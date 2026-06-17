@@ -1,0 +1,17 @@
+.DS_Store
+
+# Exports / rapports générés
+products_export_*.csv
+products_export_*.zip
+rapport_qualite_catalogue.csv
+rapport_qualite_catalogue.xlsx
+_extracted/
+
+# Sessions / cache / fichiers navigateur
+lightspeed_session/
+__pycache__/
+*.pyc
+
+# Logs / fichiers temporaires
+*.log
+*.tmp
