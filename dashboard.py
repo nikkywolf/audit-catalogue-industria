@@ -704,32 +704,32 @@ if page == "📋 To-Do List":
             "✅ Terminées"
         ])
 
-        with todo_tab_active:
-            active_table = todos_df[
-                todos_df["Statut"] != "Terminé"
-            ].copy()
+            with todo_tab_active:
+                active_table = todos_df[
+                    todos_df["Statut"] != "Terminé"
+                ].copy()
 
-            if assignee_filter != "Tout le monde":
-                active_table = active_table[
-                    active_table["Assigne"] == assignee_filter
-                ]
+                if assignee_filter != "Tout le monde":
+                    active_table = active_table[
+                        active_table["Assigne"] == assignee_filter
+                    ]
 
-            if "Priorite" in active_table.columns:
-                active_table = active_table.drop(columns=["Priorite"])
+                if "Priorite" in active_table.columns:
+                    active_table = active_table.drop(columns=["Priorite"])
 
-            st.dataframe(active_table, use_container_width=True)
+                st.dataframe(active_table, use_container_width=True)
 
-        with todo_tab_done:
-            done_table = todos_df[
-                todos_df["Statut"] == "Terminé"
-            ].copy()
+    with todo_tab_done:
+        done_table = todos_df[
+            todos_df["Statut"] == "Terminé"
+        ].copy()
 
-            if assignee_filter != "Tout le monde":
-                done_table = done_table[
-                    done_table["Assigne"] == assignee_filter
-                ]
+        if assignee_filter != "Tout le monde":
+            done_table = done_table[
+                done_table["Assigne"] == assignee_filter
+            ]
 
-            if "Priorite" in done_table.columns:
-                done_table = done_table.drop(columns=["Priorite"])
+        if "Priorite" in done_table.columns:
+            done_table = done_table.drop(columns=["Priorite"])
 
-            st.dataframe(done_table, use_container_width=True)
+        st.dataframe(done_table, use_container_width=True)
