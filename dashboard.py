@@ -93,6 +93,8 @@ selected_brands = st.sidebar.multiselect(
 
 df = df[df["Brand"].isin(selected_brands)]
 
+st.sidebar.write(f"Produits après filtre : {len(df)}")
+
 approved_pairs = set(
     zip(
         approvals_df["Internal_Variant_ID"].astype(str),
