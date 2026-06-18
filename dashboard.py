@@ -56,6 +56,7 @@ REPORT_FILE = BASE_DIR / "rapport_qualite_catalogue.xlsx"
 APPROVALS_FILE = BASE_DIR / "approbations_erreurs.csv"
 HISTORY_FILE = BASE_DIR / "historique_audit.csv"
 TODO_FILE = BASE_DIR / "todo_list.csv"
+BRAND_SETTINGS_FILE = BASE_DIR / "brand_settings.csv"
 
 st.title("📊 Industria Catalogue Audit")
 st.sidebar.success(
@@ -111,17 +112,49 @@ def load_todos():
 
 def save_todos(todos_df):
     todos_df.to_csv(TODO_FILE, index=False)
+    
+def load_processed_brands(all_brands):
+    if BRAND_SETTINGS_FILE.exists():
+        settings_df = pd.read_csv(BRAND_SETTINGS_FILE)
+
+        if "Brand" in settings_df.columns:
+            saved_brands = settings_df["Brand"].dropna().tolist()
+            return [brand for brand in saved_brands if brand in all_brands]
+
+    return all_brands
+
+
+def save_processed_brands(processed_brands):
+    settings_df = pd.DataFrame({
+        "Brand": processed_brands
+    })
+
+    settings_df.to_csv(BRAND_SETTINGS_FILE, index=False)
 
 df, brand_summary, approvals_df = load_dashboard_data()
 all_brands = sorted(df["Brand"].dropna().unique())
 
-selected_brands = st.sidebar.multiselect(
-    "🏷️ Marques affichées",
-    all_brands,
-    default=all_brands
+processed_brands = load_processed_brands(all_brands)
+
+if st.session_state.role == "admin":
+    processed_brands = st.sidebar.multiselect(
+        "✅ Marques traitées",
+        all_brands,
+        default=processed_brands
+    )
+
+    if st.sidebar.button("💾 Sauvegarder les marques traitées"):
+        save_processed_brands(processed_brands)
+        st.sidebar.success("Marques traitées sauvegardées.")
+        st.rerun()
+
+display_brands = st.sidebar.multiselect(
+    "👁️ Marques affichées temporairement",
+    processed_brands,
+    default=processed_brands
 )
 
-df = df[df["Brand"].isin(selected_brands)]
+df = df[df["Brand"].isin(display_brands)]
 
 page = st.radio(
     "Navigation",
@@ -553,7 +586,24 @@ if page == "📋 To-Do List":
     else:
         for _, row in active_todos.iterrows():
             with st.expander(f"{row['Tache']} — échéance : {row.get('Date_echeance', '')}"):
-                st.write(row["Description"])
+                new_description = st.text_area(
+                    "Description",
+                    value=row["Description"],
+                    key=f"desc_{row['ID']}"
+                )
+
+                if st.button(
+                    "💾 Sauvegarder la description",
+                    key=f"save_desc_{row['ID']}"
+                ):
+                    todos_df.loc[
+                        todos_df["ID"] == row["ID"],
+                        "Description"
+                    ] = new_description
+
+                    save_todos(todos_df)
+                    st.success("Description mise à jour.")
+                    st.rerun()
                 st.write(f"Assigné à : {row['Assigne']}")
                 st.write(f"Créé par : {row['Cree_par']}")
                 st.write(f"Créé le : {row['Date_creation']}")
