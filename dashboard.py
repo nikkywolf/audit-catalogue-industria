@@ -44,11 +44,13 @@ st.set_page_config(page_title="Industria Audit", layout="wide")
 
 st_autorefresh(interval=30000, key="dashboard_refresh")
 
-BASE_DIR = "/Users/industriacoiffure/industria-apps/audit-catalogue-industria"
+from pathlib import Path
 
-REPORT_FILE = f"{BASE_DIR}/rapport_qualite_catalogue.xlsx"
-APPROVALS_FILE = f"{BASE_DIR}/approbations_erreurs.csv"
-HISTORY_FILE = f"{BASE_DIR}/historique_audit.csv"
+BASE_DIR = Path(__file__).resolve().parent
+
+REPORT_FILE = BASE_DIR / "rapport_qualite_catalogue.xlsx"
+APPROVALS_FILE = BASE_DIR / "approbations_erreurs.csv"
+HISTORY_FILE = BASE_DIR / "historique_audit.csv"
 
 st.title("📊 Industria Catalogue Audit")
 st.sidebar.success(
