@@ -34,6 +34,11 @@ USERS = {
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "display_name" not in st.session_state:
+    st.session_state.display_name = ""
+
+if "role" not in st.session_state:
+    st.session_state.role = ""
 
 if not st.session_state.authenticated:
 
