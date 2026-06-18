@@ -27,22 +27,22 @@ if not st.session_state.authenticated:
 
     st.title("🔒 Industria Audit")
 
-with st.form("login_form"):
+    with st.form("login_form"):
 
-    username = st.text_input("Nom d'utilisateur")
-    password = st.text_input("Mot de passe", type="password")
+        username = st.text_input("Nom d'utilisateur")
+        password = st.text_input("Mot de passe", type="password")
 
-    submitted = st.form_submit_button("Connexion")
+        submitted = st.form_submit_button("Connexion")
 
-    if submitted:
+        if submitted:
 
-        if username in USERS and USERS[username] == password:
-            st.session_state.authenticated = True
-            st.session_state.user = username
-            st.rerun()
+            if username in USERS and USERS[username] == password:
+                st.session_state.authenticated = True
+                st.session_state.user = username
+                st.rerun()
 
-        else:
-            st.error("Nom d'utilisateur ou mot de passe invalide")
+            else:
+                st.error("Nom d'utilisateur ou mot de passe invalide")
 
     st.stop()
 
