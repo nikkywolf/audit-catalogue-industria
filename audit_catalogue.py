@@ -4,6 +4,7 @@ import os
 import glob
 import zipfile
 import tempfile
+import subprocess
 from datetime import datetime
 from collections import Counter
 from urllib.parse import urlparse, unquote
@@ -550,3 +551,36 @@ print("")
 print("Résumé par marque généré dans l'onglet Excel : Résumé par marque")
 print(f"CSV généré : {OUTPUT_CSV}")
 print(f"Excel généré : {OUTPUT_EXCEL}")
+# ==========================================
+# Synchronisation vers VPS
+# ==========================================
+
+print("")
+print("Synchronisation vers le dashboard en ligne...")
+
+VPS_DESTINATION = "ubuntu@144.217.80.100:/home/ubuntu/audit-catalogue-industria/"
+
+files_to_sync = [
+    OUTPUT_EXCEL,
+    HISTORY_FILE,
+    "approbations_erreurs.csv",
+]
+
+try:
+    subprocess.run(
+        ["scp"] + files_to_sync + [VPS_DESTINATION],
+        check=True
+    )
+
+    subprocess.run(
+        [
+            "ssh",
+            "ubuntu@144.217.80.100",
+            "sudo systemctl restart industria-dashboard"
+        ],
+        check=True
+    )
+
+    print("Dashboard en ligne mis à jour.")
+except Exception as e:
+    print(f"Erreur pendant la synchronisation VPS : {e}")

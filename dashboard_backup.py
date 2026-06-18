@@ -9,37 +9,6 @@ import streamlit as st
 
 from streamlit_autorefresh import st_autorefresh
 
-
-# ==========================================
-# Authentification simple
-# ==========================================
-
-USERS = {
-    "vero": "Industria2026!",
-    "nathalie": "Industria2026!",
-    "virginy": "Industria2026!"
-}
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-
-    st.title("🔒 Industria Audit")
-
-    username = st.text_input("Nom d'utilisateur")
-    password = st.text_input("Mot de passe", type="password")
-
-    if st.button("Connexion"):
-        if username in USERS and USERS[username] == password:
-            st.session_state.authenticated = True
-            st.session_state.user = username
-            st.rerun()
-        else:
-            st.error("Nom d'utilisateur ou mot de passe invalide")
-
-    st.stop()
-
 st.set_page_config(page_title="Industria Audit", layout="wide")
 
 st_autorefresh(interval=30000, key="dashboard_refresh")
@@ -51,9 +20,7 @@ APPROVALS_FILE = f"{BASE_DIR}/approbations_erreurs.csv"
 HISTORY_FILE = f"{BASE_DIR}/historique_audit.csv"
 
 st.title("📊 Industria Catalogue Audit")
-st.sidebar.success(
-    f"Connecté : {st.session_state.user}"
-)
+
 
 def read_excel_safely(file, sheet_name, retries=10, delay=2):
     for _ in range(retries):
