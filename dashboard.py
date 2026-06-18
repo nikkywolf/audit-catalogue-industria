@@ -262,15 +262,30 @@ if page == "📊 Overview":
                 available_dates = history_df["Date"].tolist()
                 today_row = history_df.iloc[-1]
 
-                col_a, col_b, col_c = st.columns(3)
+                col_a, col_b, col_c = st.columns([3,1,1])
 
-                with col_a:
-                    compare_date = st.selectbox(
-                        "Comparer avec l'audit",
-                        available_dates[:-1],
-                        index=len(available_dates[:-1]) - 1,
-                        format_func=lambda d: d.strftime("%Y-%m-%d %H:%M")
-                    )
+            with col_a:
+                selected_compare_day = st.date_input(
+                    "Comparer avec la date",
+                    value=available_dates[-2].date(),
+                    min_value=history_df["Date"].dt.date.min(),
+                    max_value=history_df["Date"].dt.date.max()
+                )
+
+                compare_candidates = history_df[
+                    history_df["Date"].dt.date <= selected_compare_day
+                ]
+
+                if compare_candidates.empty:
+                    compare_row = history_df.iloc[0]
+                else:
+                    compare_row = compare_candidates.iloc[-1]
+
+                compare_date = compare_row["Date"]
+
+                st.caption(
+                    f"Audit utilisé : {compare_date.strftime('%Y-%m-%d %H:%M')}"
+                )
 
                 with col_b:
                     start_date = st.date_input(
@@ -288,7 +303,6 @@ if page == "📊 Overview":
                         max_value=history_df["Date"].dt.date.max()
                     )
 
-                compare_row = history_df[history_df["Date"] == compare_date].iloc[0]
 
                 d1, d2, d3 = st.columns(3)
 
@@ -310,39 +324,46 @@ if page == "📊 Overview":
                     int(today_row["Critiques"] - compare_row["Critiques"])
                 )
 
-                graph_df = history_df[
-                    (history_df["Date"].dt.date >= start_date)
-                    & (history_df["Date"].dt.date <= end_date)
-                ].copy()
+            graph_df = history_df[
+                (history_df["Date"].dt.date >= start_date)
+                & (history_df["Date"].dt.date <= end_date)
+            ].copy()
 
-                if len(graph_df) >= 2:
-                    history_long = graph_df.melt(
-                        id_vars="Date_str",
-                        value_vars=["Conformes", "Action_requise", "Critiques"],
-                        var_name="Statut",
-                        value_name="Nombre"
-                    )
-
-                    fig_history = px.line(
-                        history_long,
-                        x="Date_str",
-                        y="Nombre",
-                        color="Statut",
-                        markers=True,
-                        title="Évolution de la qualité catalogue par audit"
-                    )
-
-                    fig_history.update_xaxes(type="category", title="Audit")
-                    fig_history.update_yaxes(title="Nombre")
-
-                    st.plotly_chart(fig_history, width="stretch")
-                else:
-                    st.info("Choisis une plage avec au moins deux audits pour afficher le graphique.")
-            else:
-                st.info(
-                    "L’historique contient seulement un audit. "
-                    "Le graphique apparaîtra quand tu auras au moins deux audits."
+            if len(graph_df) >= 2:
+                history_long = graph_df.melt(
+                    id_vars=["Date", "Date_str"],
+                    value_vars=["Conformes", "Action_requise", "Critiques"],
+                    var_name="Statut",
+                    value_name="Nombre"
                 )
+
+                fig_history = px.line(
+                    history_long,
+                    x="Date",
+                    y="Nombre",
+                    color="Statut",
+                    markers=True,
+                    title="Évolution de la qualité catalogue par audit"
+                )
+
+                fig_history.update_xaxes(title="Audit")
+                fig_history.update_yaxes(title="Nombre")
+                
+                fig_history.update_layout(
+                    autosize=True,
+                    height=500,
+                    width=None,
+                    margin=dict(l=20, r=20, t=60, b=80)
+                )
+                
+                st.container().plotly_chart(
+                    fig_history,
+                    use_container_width=True
+                )
+                
+            else:
+                st.info("Choisis une plage avec au moins deux audits pour afficher le graphique.")
+
 
     st.divider()
 
