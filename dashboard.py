@@ -83,8 +83,15 @@ def load_dashboard_data():
     return df, brand_summary, approvals_df
 
 df, brand_summary, approvals_df = load_dashboard_data()
+all_brands = sorted(df["Brand"].dropna().unique())
 
-st.write(df.columns.tolist())
+selected_brands = st.sidebar.multiselect(
+    "🏷️ Marques affichées",
+    all_brands,
+    default=all_brands
+)
+
+df = df[df["Brand"].isin(selected_brands)]
 
 approved_pairs = set(
     zip(
