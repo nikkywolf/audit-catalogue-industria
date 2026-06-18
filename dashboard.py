@@ -68,14 +68,21 @@ def read_excel_safely(file, sheet_name, retries=10, delay=2):
 
     return pd.read_excel(file, sheet_name=sheet_name)
 
-df = read_excel_safely(REPORT_FILE, sheet_name="Tous les produits")
-brand_summary = read_excel_safely(REPORT_FILE, sheet_name="Résumé par marque")
+@st.cache_data(ttl=300)
+def load_dashboard_data():
+    df = read_excel_safely(REPORT_FILE, sheet_name="Tous les produits")
+    brand_summary = read_excel_safely(REPORT_FILE, sheet_name="Résumé par marque")
 
-# Approbations
-if os.path.exists(APPROVALS_FILE):
-    approvals_df = pd.read_csv(APPROVALS_FILE)
-else:
-    approvals_df = pd.DataFrame(columns=["Internal_Variant_ID", "Type", "Erreur", "Date"])
+    if os.path.exists(APPROVALS_FILE):
+        approvals_df = pd.read_csv(APPROVALS_FILE)
+    else:
+        approvals_df = pd.DataFrame(
+            columns=["Internal_Variant_ID", "Type", "Erreur", "Date"]
+        )
+
+    return df, brand_summary, approvals_df
+
+df, brand_summary, approvals_df = load_dashboard_data()
 
 approved_pairs = set(
     zip(
