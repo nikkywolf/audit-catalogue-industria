@@ -563,7 +563,6 @@ VPS_DESTINATION = "ubuntu@144.217.80.100:/home/ubuntu/audit-catalogue-industria/
 files_to_sync = [
     OUTPUT_EXCEL,
     HISTORY_FILE,
-    "approbations_erreurs.csv",
 ]
 
 try:
