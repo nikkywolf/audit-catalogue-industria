@@ -64,6 +64,7 @@ st.sidebar.success(
 st.sidebar.caption(
     f"Rôle : {st.session_state.role}"
 )
+st.sidebar.link_button("🚪 Déconnexion", "https://dashboardindustria.com/logout")
 
 @st.cache_data(ttl=60)
 def read_excel_safely(file, sheet_name, retries=10, delay=2):
