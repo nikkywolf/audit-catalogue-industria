@@ -57,6 +57,7 @@ st.sidebar.success(
     f"Connecté : {st.session_state.user}"
 )
 
+@st.cache_data(ttl=60)
 def read_excel_safely(file, sheet_name, retries=10, delay=2):
     for _ in range(retries):
         try:
