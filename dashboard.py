@@ -15,9 +15,21 @@ from streamlit_autorefresh import st_autorefresh
 # ==========================================
 
 USERS = {
-    "vero": "Industria2026!",
-    "nathalie": "Industria2026!",
-    "virginy": "Industria2026!"
+    "vero": {
+        "password": "Industria2026!",
+        "name": "Vero",
+        "role": "admin"
+    },
+    "nathalie": {
+        "password": "Industria2026!",
+        "name": "Nathalie",
+        "role": "editor"
+    },
+    "virginy": {
+        "password": "Industria2026!",
+        "name": "Virginy",
+        "role": "editor"
+    }
 }
 
 if "authenticated" not in st.session_state:
@@ -36,9 +48,15 @@ if not st.session_state.authenticated:
 
         if submitted:
 
-            if username in USERS and USERS[username] == password:
+            if (
+                username in USERS
+                and USERS[username]["password"] == password
+            ):
                 st.session_state.authenticated = True
                 st.session_state.user = username
+                st.session_state.role = USERS[username]["role"]
+                st.session_state.display_name = USERS[username]["name"]
+
                 st.rerun()
 
             else:
@@ -60,8 +78,18 @@ HISTORY_FILE = BASE_DIR / "historique_audit.csv"
 
 st.title("📊 Industria Catalogue Audit")
 st.sidebar.success(
-    f"Connecté : {st.session_state.user}"
+    f"Connecté : {st.session_state.display_name}"
 )
+
+st.sidebar.caption(
+    f"Rôle : {st.session_state.role}"
+)
+if st.sidebar.button("🚪 Déconnexion"):
+
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+    st.rerun()
 
 @st.cache_data(ttl=60)
 def read_excel_safely(file, sheet_name, retries=10, delay=2):
