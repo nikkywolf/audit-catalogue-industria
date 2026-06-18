@@ -132,9 +132,15 @@ def save_processed_brands(processed_brands):
     settings_df.to_csv(BRAND_SETTINGS_FILE, index=False)
 
 df, brand_summary, approvals_df = load_dashboard_data()
+full_df = df.copy()
 all_brands = sorted(df["Brand"].dropna().unique())
 
 processed_brands = load_processed_brands(all_brands)
+
+produits_ecom = len(full_df)
+produits_a_ignorer = len(
+    full_df[~full_df["Brand"].isin(processed_brands)]
+)
 
 if st.session_state.role == "admin":
     processed_brands = st.sidebar.multiselect(
@@ -220,12 +226,14 @@ df["Tout approuvé"] = (df["Erreurs restantes"] == 0) & (df["Erreurs approuvées
 
 if page == "📊 Overview":
     # Métriques principales
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Produits", len(df))
     c2.metric("Conformes", len(df[df["Priorité"] == "Conforme"]))
     c3.metric("Action requise", len(df[df["Priorité"] == "Action requise"]))
     c4.metric("Critiques", len(df[df["Priorité"] == "Critique"]))
     c5.metric("Erreurs approuvées", int(df["Erreurs approuvées"].sum()))
+    c6.metric("Produits e-com", produits_ecom)
+    c7.metric("Produits à ignorer", produits_a_ignorer)
 
     st.divider()
 
