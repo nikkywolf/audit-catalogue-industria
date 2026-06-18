@@ -84,6 +84,8 @@ def load_dashboard_data():
 
 df, brand_summary, approvals_df = load_dashboard_data()
 
+st.write(df.columns.tolist())
+
 approved_pairs = set(
     zip(
         approvals_df["Internal_Variant_ID"].astype(str),
