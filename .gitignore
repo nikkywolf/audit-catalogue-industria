@@ -15,3 +15,8 @@ __pycache__/
 # Logs / fichiers temporaires
 *.log
 *.tmp
+
+todo_list.csv
+approbations_erreurs.csv
+processed_exports.txt
+.DS_Store
