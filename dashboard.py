@@ -32,42 +32,17 @@ USERS = {
     }
 }
 
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "display_name" not in st.session_state:
-    st.session_state.display_name = ""
+# Utilisateur connecté via Nginx Basic Auth
+current_user = st.context.headers.get("X-Remote-User", "").lower()
 
-if "role" not in st.session_state:
-    st.session_state.role = ""
-
-if not st.session_state.authenticated:
-
-    st.title("🔒 Industria Audit")
-
-    with st.form("login_form"):
-
-        username = st.text_input("Nom d'utilisateur")
-        password = st.text_input("Mot de passe", type="password")
-
-        submitted = st.form_submit_button("Connexion")
-
-        if submitted:
-
-            if (
-                username in USERS
-                and USERS[username]["password"] == password
-            ):
-                st.session_state.authenticated = True
-                st.session_state.user = username
-                st.session_state.role = USERS[username]["role"]
-                st.session_state.display_name = USERS[username]["name"]
-
-                st.rerun()
-
-            else:
-                st.error("Nom d'utilisateur ou mot de passe invalide")
-
+if current_user not in USERS:
+    st.error("Utilisateur non autorisé")
     st.stop()
+
+st.session_state.authenticated = True
+st.session_state.user = current_user
+st.session_state.role = USERS[current_user]["role"]
+st.session_state.display_name = USERS[current_user]["name"]
 
 st.set_page_config(page_title="Industria Audit", layout="wide")
 
@@ -89,12 +64,6 @@ st.sidebar.success(
 st.sidebar.caption(
     f"Rôle : {st.session_state.role}"
 )
-if st.sidebar.button("🚪 Déconnexion"):
-
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-
-    st.rerun()
 
 @st.cache_data(ttl=60)
 def read_excel_safely(file, sheet_name, retries=10, delay=2):
