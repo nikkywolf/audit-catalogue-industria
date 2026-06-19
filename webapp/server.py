@@ -200,16 +200,26 @@ def load_processed_brands() -> set[str]:
     return {str(row["Brand"]) for row in rows}
 
 
-def load_products() -> list[dict[str, Any]]:
+def load_json_payload_table(table: str) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute("SELECT payload FROM catalogue_report").fetchall()
-    return [json.loads(row["payload"]) for row in rows]
+        rows = conn.execute(f"SELECT payload FROM {table}").fetchall()
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def load_products() -> list[dict[str, Any]]:
+    return load_json_payload_table("catalogue_report")
 
 
 def load_brand_summary() -> list[dict[str, Any]]:
-    with connect() as conn:
-        rows = conn.execute("SELECT payload FROM brand_summary").fetchall()
-    return [json.loads(row["payload"]) for row in rows]
+    return load_json_payload_table("brand_summary")
 
 
 def product_count_by_brand(products: list[dict[str, Any]]) -> dict[str, int]:
