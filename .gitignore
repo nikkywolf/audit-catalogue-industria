@@ -15,3 +15,7 @@ lightspeed_session/
 # SQLite runtime files. The main .db can be committed, not these.
 *.db-shm
 *.db-wal
+# Les exports synchronisés vont dans exports/.
+/products_export_*.csv
+/products_export_*.zip
+*.db.before-*
