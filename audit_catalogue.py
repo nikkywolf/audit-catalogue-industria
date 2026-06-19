@@ -6,10 +6,15 @@ import zipfile
 import tempfile
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from collections import Counter
 from urllib.parse import urlparse, unquote
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
+from database import add_history_row, export_audit_sync_db, replace_report
+
+BASE_DIR = Path(__file__).resolve().parent
+os.chdir(BASE_DIR)
 
 DOWNLOAD_FOLDER = os.path.expanduser("~/Downloads/audit-catalogue-industria")
 
@@ -52,6 +57,7 @@ else:
 
 OUTPUT_CSV = "rapport_qualite_catalogue.csv"
 OUTPUT_EXCEL = "rapport_qualite_catalogue.xlsx"
+AUDIT_SYNC_DB = "industria_export_sync.db"
 
 print(f"CSV utilisé : {INPUT_FILE}")
 
@@ -465,6 +471,7 @@ catalog_alerts_df = pd.DataFrame(split_errors(active_df["Alertes catalogue"]).mo
 correction_types_df = pd.DataFrame(split_errors(active_df["Type de correction"]).most_common(50), columns=["Type de correction", "Nombre"])
 
 report_df.to_csv(OUTPUT_CSV, index=False)
+replace_report(report_df, brand_summary)
 
 with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
     summary_df.to_excel(writer, sheet_name="Résumé", index=False)
@@ -534,6 +541,8 @@ historique_row = pd.DataFrame([{
     "Critiques": int((active_df["Priorité"] == "Critique").sum()),
 }])
 
+add_history_row(historique_row.iloc[0].to_dict())
+
 if os.path.exists(HISTORY_FILE):
     historique_df = pd.read_csv(HISTORY_FILE)
 
@@ -551,6 +560,9 @@ print("")
 print("Résumé par marque généré dans l'onglet Excel : Résumé par marque")
 print(f"CSV généré : {OUTPUT_CSV}")
 print(f"Excel généré : {OUTPUT_EXCEL}")
+
+export_audit_sync_db(BASE_DIR / AUDIT_SYNC_DB)
+print(f"Base de synchronisation générée : {AUDIT_SYNC_DB}")
 # ==========================================
 # Synchronisation vers VPS
 # ==========================================
@@ -561,8 +573,10 @@ print("Synchronisation vers le dashboard en ligne...")
 VPS_DESTINATION = "ubuntu@144.217.80.100:/home/ubuntu/audit-catalogue-industria/"
 
 files_to_sync = [
+    "database.py",
     OUTPUT_EXCEL,
     HISTORY_FILE,
+    AUDIT_SYNC_DB,
 ]
 
 try:
@@ -575,7 +589,15 @@ try:
         [
             "ssh",
             "ubuntu@144.217.80.100",
-            "sudo systemctl restart industria-dashboard"
+            (
+                "cd /home/ubuntu/audit-catalogue-industria && "
+                "venv/bin/python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                "from database import import_audit_sync_db\n"
+                "import_audit_sync_db(Path('industria_export_sync.db'))\n"
+                "PY\n"
+                "sudo systemctl restart industria-dashboard"
+            )
         ],
         check=True
     )

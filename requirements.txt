@@ -1,0 +1,7 @@
+streamlit
+streamlit-autorefresh
+pandas
+plotly
+openpyxl
+fastapi
+uvicorn[standard]

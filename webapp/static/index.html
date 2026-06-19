@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Industria Audit</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <h1>Industria Audit</h1>
+      <div id="userBox" class="muted"></div>
+      <div id="syncBox" class="muted"></div>
+      <nav>
+        <button class="nav active" data-page="overview">Overview</button>
+        <button class="nav" data-page="errors">Erreurs</button>
+        <button class="nav admin-only" data-page="gptBatch">Batch GPT</button>
+        <button class="nav" data-page="todos">To-Do List</button>
+        <button class="nav" data-page="admin">Admin</button>
+      </nav>
+      <a class="logout" href="https://dashboardindustria.com/logout">Déconnexion</a>
+    </aside>
+
+    <main>
+      <section id="overview" class="page active">
+        <div class="page-title">
+          <h2>Overview</h2>
+        </div>
+        <div id="metrics" class="metrics"></div>
+
+        <section class="panel admin-only">
+          <div class="panel-title">
+            <h3>Produits ignorés individuellement</h3>
+            <input id="ignoredSearch" type="search" placeholder="Recherche" />
+          </div>
+          <div id="ignoredTable" class="table-wrap compact"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Résumé par marque</h3>
+          <div id="brandSummary" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="errors" class="page">
+        <div class="page-title">
+          <h2>Produits</h2>
+        </div>
+        <section class="panel">
+          <div class="filters">
+            <input id="productSearch" type="search" placeholder="Recherche produit, marque, SKU ou UPC" />
+            <select id="brandFilter"></select>
+            <select id="priorityFilter"></select>
+            <select id="correctionFilter"></select>
+            <select id="approvalFilter">
+              <option value="pending">À traiter seulement</option>
+              <option value="all">Tous</option>
+              <option value="approved">Tout approuvé seulement</option>
+            </select>
+            <select id="limitFilter">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+            </select>
+          </div>
+          <div id="productCount" class="muted"></div>
+          <div id="productsTable" class="table-wrap products"></div>
+        </section>
+      </section>
+
+      <section id="gptBatch" class="page">
+        <div class="page-title">
+          <h2>Batch GPT</h2>
+        </div>
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits corrigeables par JSON</h3>
+            <div class="toolbar">
+              <input id="batchCandidateSearch" type="search" placeholder="Recherche" />
+              <button id="queueBatchCandidates">Ajouter 50 en attente</button>
+            </div>
+          </div>
+          <div id="batchCandidatesTable" class="table-wrap compact"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits batchs en attente</h3>
+            <div class="toolbar">
+              <button id="submitGptBatch">Envoyer batch API</button>
+              <button id="syncGptBatch">Récupérer résultats</button>
+            </div>
+          </div>
+          <div id="batchPendingTable" class="table-wrap compact"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits batchs terminés</h3>
+            <input id="batchCompletedSearch" type="search" placeholder="Recherche" />
+          </div>
+          <div id="batchCompletedTable" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="todos" class="page">
+        <div class="page-title">
+          <h2>To-Do List</h2>
+        </div>
+        <section class="panel">
+          <form id="todoForm" class="todo-form">
+            <input name="tache" placeholder="Tâche" required />
+            <input name="assigne" placeholder="Assigné à" />
+            <input name="date_echeance" type="date" />
+            <textarea name="description" placeholder="Description"></textarea>
+            <button type="submit">Ajouter</button>
+          </form>
+          <div id="todosList" class="table-wrap todos-table"></div>
+        </section>
+      </section>
+
+      <section id="admin" class="page">
+        <div class="page-title">
+          <h2>Admin</h2>
+        </div>
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Marques complètes</h3>
+            <input id="brandAdminSearch" type="search" placeholder="Recherche marque" />
+          </div>
+          <div class="brand-admin-grid">
+            <div>
+              <h3>Marques actives</h3>
+              <div id="activeBrandsTable" class="table-wrap compact"></div>
+            </div>
+            <div>
+              <h3>Marques ignorées</h3>
+              <div id="ignoredBrandsTable" class="table-wrap compact"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Industria Lightspeed catalogue sync every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=industria-lightspeed-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,6 +1,8 @@
 import os
 import time
 import subprocess
+import shutil
+from datetime import datetime
 
 DOWNLOAD_FOLDER = os.path.expanduser(
     "~/Downloads/audit-catalogue-industria"
@@ -10,12 +12,18 @@ PROJECT_FOLDER = os.path.expanduser(
     "~/industria-apps/audit-catalogue-industria"
 )
 
+EXPORTS_FOLDER = os.path.join(PROJECT_FOLDER, "exports")
+
 PROCESSED_FILE = os.path.join(
     PROJECT_FOLDER,
     "processed_exports.txt"
 )
 
+CHECK_INTERVAL_SECONDS = 20
+DOWNLOAD_STABILITY_SECONDS = 8
+
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+os.makedirs(EXPORTS_FOLDER, exist_ok=True)
 
 def load_processed():
     if not os.path.exists(PROCESSED_FILE):
@@ -35,7 +43,7 @@ def save_processed(filename):
 def file_is_finished(path):
     try:
         size_1 = os.path.getsize(path)
-        time.sleep(5)
+        time.sleep(DOWNLOAD_STABILITY_SECONDS)
         size_2 = os.path.getsize(path)
 
         return (
@@ -45,9 +53,21 @@ def file_is_finished(path):
     except Exception:
         return False
 
-print("Surveillance du dossier d'exports Lightspeed...")
-print(DOWNLOAD_FOLDER)
-print("Watcher actif.")
+def log(message):
+    print(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}",
+        flush=True
+    )
+
+def copy_export_to_repo(path, filename):
+    destination = os.path.join(EXPORTS_FOLDER, filename)
+    if not os.path.exists(destination):
+        shutil.copy2(path, destination)
+
+log("Surveillance du dossier d'exports Lightspeed pour la v2...")
+log(DOWNLOAD_FOLDER)
+log(f"Projet audité : {PROJECT_FOLDER}")
+log("Watcher actif.")
 
 while True:
     try:
@@ -74,29 +94,35 @@ while True:
             if not file_is_finished(full_path):
                 continue
 
-            print("")
-            print(f"Nouvel export détecté : {filename}")
-            print("Lancement de l'audit...")
+            log("")
+            log(f"Nouvel export détecté : {filename}")
+            copy_export_to_repo(full_path, filename)
+            log("Lancement de l'audit...")
 
             result = subprocess.run(
-                ["python3", "audit_catalogue.py"],
+                ["/usr/bin/python3", "audit_catalogue.py"],
                 cwd=PROJECT_FOLDER
             )
 
             if result.returncode == 0:
                 save_processed(filename)
 
-                print("Audit terminé.")
-                print(
-                    f"Export marqué comme traité : {filename}"
-                )
-            else:
-                print(
-                    "Erreur pendant l'audit."
-                )
+                log("Audit terminé.")
+                log(f"Export marqué comme traité : {filename}")
 
-        time.sleep(5)
+                sync_result = subprocess.run(
+                    ["/usr/bin/python3", "sync_repo_to_github.py"],
+                    cwd=PROJECT_FOLDER
+                )
+                if sync_result.returncode == 0:
+                    log("GitHub synchronisé.")
+                else:
+                    log("Audit terminé, mais la synchronisation GitHub a échoué.")
+            else:
+                log("Erreur pendant l'audit.")
+
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
     except Exception as e:
-        print(f"ERREUR WATCHER: {e}")
-        time.sleep(10)
+        log(f"ERREUR WATCHER: {e}")
+        time.sleep(CHECK_INTERVAL_SECONDS)

@@ -1,19 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Industria Sync Export",
-  "version": "1.0.0",
-  "description": "Automatise l'export Produits Lightspeed.",
+  "version": "1.0.1",
+  "description": "Extension désactivée côté Lightspeed; le watcher local synchronise les exports téléchargés.",
   "permissions": ["downloads"],
-  "host_permissions": [
-    "https://*.shoplightspeed.com/*"
-  ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://*.shoplightspeed.com/*"],
-      "js": ["content.js"]
-    }
-  ]
+  "content_scripts": []
 }

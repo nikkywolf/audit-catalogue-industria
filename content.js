@@ -1,190 +1,122 @@
- (function () {
-   if (document.getElementById("industria-sync-button")) return;
+(function () {
+  const BUTTON_ID = "industria-sync-button";
 
-   function wait(ms) {
-     return new Promise(resolve => setTimeout(resolve, ms));
-   }
+  function normalizeText(value) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
 
-   function findByText(selector, text) {
-     return [...document.querySelectorAll(selector)].find(el =>
-       el.innerText && el.innerText.trim().includes(text)
-     );
-   }
+  function isVisible(element) {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
 
-   function safeFileNameFromUrl(url) {
-     try {
-       const cleanUrl = new URL(url);
-       const pathParts = cleanUrl.pathname.split("/");
-       const lastPart = pathParts[pathParts.length - 1];
+  function safeFileNameFromUrl(url) {
+    try {
+      const cleanUrl = new URL(url);
+      const pathParts = cleanUrl.pathname.split("/");
+      const lastPart = pathParts[pathParts.length - 1];
 
-       if (lastPart && lastPart.includes(".")) {
-         return decodeURIComponent(lastPart);
-       }
-     } catch (e) {}
+      if (lastPart && lastPart.includes(".")) {
+        return decodeURIComponent(lastPart);
+      }
+    } catch (e) {}
 
-     const now = new Date();
-     const stamp = now.toISOString().replace(/[:.]/g, "-");
-     return `products_export_${stamp}.zip`;
-   }
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[:.]/g, "-");
+    return `products_export_${stamp}.zip`;
+  }
 
-   function createButton() {
-     const button = document.createElement("button");
-     button.id = "industria-sync-button";
-     button.innerText = "🔄 Sync Produits";
+  function findLatestFinishedProductsExport() {
+    const rows = [...document.querySelectorAll("tbody tr")];
+    return rows.find(row => {
+      const text = normalizeText(row.innerText);
+      return text.includes("produits") && (
+        text.includes("termine") ||
+        text.includes("completed") ||
+        text.includes("finished")
+      );
+    });
+  }
 
-     Object.assign(button.style, {
-       position: "fixed",
-       top: "90px",
-       right: "30px",
-       zIndex: "999999",
-       padding: "12px 18px",
-       background: "#111827",
-       color: "white",
-       border: "none",
-       borderRadius: "8px",
-       fontSize: "15px",
-       fontWeight: "700",
-       cursor: "pointer"
-     });
+  function findDownloadUrl(row) {
+    const link = [...row.querySelectorAll("a")].find(element =>
+      isVisible(element) && normalizeText(element.innerText || element.textContent).includes("telecharger")
+    );
+    return link ? link.href : "";
+  }
 
-     button.onclick = async () => {
-       button.innerText = "⏳ Création export...";
-       button.disabled = true;
+  function downloadLatestExport(button) {
+    const row = findLatestFinishedProductsExport();
+    if (!row) {
+      alert("Aucun export Produits terminé trouvé. Crée l'export manuellement, attends qu'il soit TERMINÉ, puis reclique sur Sync Produits.");
+      return;
+    }
 
-       try {
-         const exportButton = findByText("a,button", "Nouvelle exportation");
+    const url = findDownloadUrl(row);
+    if (!url) {
+      alert("Export Produits trouvé, mais lien Télécharger introuvable.");
+      return;
+    }
 
-         if (!exportButton) {
-           alert("Bouton Nouvelle exportation introuvable.");
-           button.innerText = "🔄 Sync Produits";
-           button.disabled = false;
-           return;
-         }
+    button.disabled = true;
+    button.innerText = "⬇️ Téléchargement...";
 
-         exportButton.click();
-         await wait(1500);
+    chrome.runtime.sendMessage(
+      {
+        action: "downloadExport",
+        url: url,
+        filename: safeFileNameFromUrl(url)
+      },
+      () => {
+        button.disabled = false;
+        button.innerText = "✅ Export téléchargé";
 
-         const dropdowns = [...document.querySelectorAll("select")];
+        if (chrome.runtime.lastError) {
+          console.error(chrome.runtime.lastError);
+          alert("Erreur Chrome download : " + chrome.runtime.lastError.message);
+          button.innerText = "🔄 Sync Produits";
+          return;
+        }
 
-         if (dropdowns.length > 0) {
-           const select = dropdowns[0];
-           const option = [...select.options].find(opt =>
-             opt.innerText.trim().includes("Produits")
-           );
+        alert("Export Produits téléchargé. Le watcher va lancer l'audit automatiquement.");
+      }
+    );
+  }
 
-           if (!option) {
-             alert("Option Produits introuvable.");
-             button.innerText = "🔄 Sync Produits";
-             button.disabled = false;
-             return;
-           }
+  function createButton() {
+    if (document.getElementById(BUTTON_ID) || !document.body) return;
 
-           select.value = option.value;
-           select.dispatchEvent(new Event("change", { bubbles: true }));
-         } else {
-           const productOption = findByText("button,div,a,span", "Produits");
+    const button = document.createElement("button");
+    button.id = BUTTON_ID;
+    button.innerText = "🔄 Sync Produits";
 
-           if (productOption) {
-             productOption.click();
-           } else {
-             alert("Menu Produits introuvable.");
-             button.innerText = "🔄 Sync Produits";
-             button.disabled = false;
-             return;
-           }
-         }
+    Object.assign(button.style, {
+      position: "fixed",
+      top: "90px",
+      right: "30px",
+      zIndex: "999999",
+      padding: "12px 18px",
+      background: "#111827",
+      color: "white",
+      border: "none",
+      borderRadius: "8px",
+      fontSize: "15px",
+      fontWeight: "700",
+      cursor: "pointer"
+    });
 
-         await wait(1000);
+    button.onclick = () => downloadLatestExport(button);
+    document.body.appendChild(button);
+  }
 
-         const createExportButton =
-           findByText("a,button", "Créer") ||
-           findByText("a,button", "Exporter") ||
-           findByText("a,button", "Démarrer");
-
-         if (!createExportButton) {
-           alert("Bouton Créer/Exporter introuvable.");
-           button.innerText = "🔄 Sync Produits";
-           button.disabled = false;
-           return;
-         }
-
-         createExportButton.click();
-
-         button.innerText = "⏳ Attente export 0/180s...";
-
-         let downloadStarted = false;
-
-         for (let i = 1; i <= 36; i++) {
-           await wait(5000);
-
-           button.innerText = `⏳ Attente export ${i * 5}/180s...`;
-
-           const rows = [...document.querySelectorAll("tbody tr")];
-
-           if (rows.length > 0) {
-             const firstRow = rows[0];
-             const rowText = firstRow.innerText;
-
-             const isProductExport = rowText.includes("Produits");
-             const isFinished = rowText.includes("TERMINÉ");
-
-             if (isProductExport && isFinished) {
-               const downloadLink = [...firstRow.querySelectorAll("a,button")].find(el =>
-                 el.innerText && el.innerText.includes("Télécharger")
-               );
-
-               if (downloadLink) {
-                 const url = downloadLink.href;
-
-                 if (!url) {
-                   alert("Lien de téléchargement introuvable. Le bouton existe, mais pas d'URL.");
-                   button.innerText = "⚠️ URL manquante";
-                   button.disabled = false;
-                   return;
-                 }
-
-                 const filename = safeFileNameFromUrl(url);
-
-                 chrome.runtime.sendMessage(
-                   {
-                     action: "downloadExport",
-                     url: url,
-                     filename: filename
-                   },
-                   response => {
-                     if (chrome.runtime.lastError) {
-                       console.error(chrome.runtime.lastError);
-                       alert("Erreur Chrome download : " + chrome.runtime.lastError.message);
-                     }
-                   }
-                 );
-
-                 downloadStarted = true;
-                 break;
-               }
-             }
-           }
-         }
-
-         if (downloadStarted) {
-           button.innerText = "✅ Export téléchargé";
-           alert("Export Produits téléchargé dans Téléchargements/audit-catalogue-industria ✅");
-         } else {
-           button.innerText = "⚠️ Export non terminé";
-           alert("L'export n'a pas été détecté comme terminé après 3 minutes.");
-         }
-
-       } catch (error) {
-         console.error(error);
-         alert("Erreur pendant la synchronisation. Regarde la console.");
-         button.innerText = "🔄 Sync Produits";
-       }
-
-       button.disabled = false;
-     };
-
-     document.body.appendChild(button);
-   }
-
-   setTimeout(createButton, 1500);
- })();
+  if (location.pathname.startsWith("/admin/exports")) {
+    setTimeout(createButton, 1500);
+  }
+})();

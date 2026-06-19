@@ -1,0 +1,8 @@
+[Unit]
+Description=Industria Lightspeed catalogue sync
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/audit-catalogue-industria
+EnvironmentFile=/home/ubuntu/audit-catalogue-industria/.env
+ExecStart=/usr/bin/python3 /home/ubuntu/audit-catalogue-industria/sync_lightspeed_api.py

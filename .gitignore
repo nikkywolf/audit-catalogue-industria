@@ -1,23 +1,17 @@
 .DS_Store
+.env
+.venv-web/
+venv/
 
-# Exports / rapports générés
-products_export_*.csv
-products_export_*.zip
-rapport_qualite_catalogue.csv
-rapport_qualite_catalogue.xlsx
-_extracted/
-
-# Sessions / cache / fichiers navigateur
-lightspeed_session/
+# Caches / fichiers temporaires
 __pycache__/
 *.pyc
-
-# Logs / fichiers temporaires
 *.log
 *.tmp
+logs/
+_extracted/
+lightspeed_session/
 
-todo_list.csv
-approbations_erreurs.csv
-processed_exports.txt
-.DS_Store
-brand_settings.csv
+# SQLite runtime files. The main .db can be committed, not these.
+*.db-shm
+*.db-wal

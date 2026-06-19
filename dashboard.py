@@ -1,13 +1,26 @@
-import os
-import zipfile
 from datetime import datetime
-import time
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from streamlit_autorefresh import st_autorefresh
+from database import (
+    approve_error,
+    import_from_sqlite,
+    import_legacy_files,
+    latest_sync_run,
+    load_approvals,
+    load_brand_summary,
+    load_history,
+    load_processed_brands,
+    load_report,
+    load_todos,
+    remove_approval,
+    save_processed_brands,
+    save_todos,
+    table_count,
+)
 
 
 # ==========================================
@@ -46,17 +59,32 @@ st.session_state.display_name = USERS[current_user]["name"]
 
 st.set_page_config(page_title="Industria Audit", layout="wide")
 
-st_autorefresh(interval=30000, key="dashboard_refresh")
+st_autorefresh(interval=300000, key="dashboard_refresh")
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stButton"] > button {
+        min-height: 2rem;
+        padding: 0.15rem 0.45rem;
+    }
+    .stMarkdown p {
+        margin-bottom: 0.15rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-REPORT_FILE = BASE_DIR / "rapport_qualite_catalogue.xlsx"
-APPROVALS_FILE = BASE_DIR / "approbations_erreurs.csv"
-HISTORY_FILE = BASE_DIR / "historique_audit.csv"
-TODO_FILE = BASE_DIR / "todo_list.csv"
-BRAND_SETTINGS_FILE = BASE_DIR / "brand_settings.csv"
+import_legacy_files()
+
+if table_count("catalogue_report") == 0:
+    legacy_db = BASE_DIR.parent / "audit-catalogue-industria" / "industria_catalogue.db"
+    import_from_sqlite(legacy_db)
 
 st.title("📊 Industria Catalogue Audit")
 st.sidebar.success(
@@ -66,81 +94,75 @@ st.sidebar.success(
 st.sidebar.caption(
     f"Rôle : {st.session_state.role}"
 )
+
+last_sync = latest_sync_run()
+if last_sync:
+    st.sidebar.caption(
+        f"Dernière sync : {last_sync['status']} "
+        f"{last_sync.get('finished_at') or last_sync.get('started_at')}"
+    )
+
 st.sidebar.link_button("🚪 Déconnexion", "https://dashboardindustria.com/logout")
 
-@st.cache_data(ttl=60)
-def read_excel_safely(file, sheet_name, retries=10, delay=2):
-    for _ in range(retries):
-        try:
-            return pd.read_excel(file, sheet_name=sheet_name)
-
-        except (EOFError, zipfile.BadZipFile):
-            time.sleep(delay)
-
-    return pd.read_excel(file, sheet_name=sheet_name)
-
-@st.cache_data(ttl=300)
 def load_dashboard_data():
-    df = read_excel_safely(REPORT_FILE, sheet_name="Tous les produits")
-    brand_summary = read_excel_safely(REPORT_FILE, sheet_name="Résumé par marque")
-
-    if os.path.exists(APPROVALS_FILE):
-        approvals_df = pd.read_csv(APPROVALS_FILE)
-    else:
-        approvals_df = pd.DataFrame(
-            columns=["Internal_Variant_ID", "Type", "Erreur", "Date"]
-        )
+    df = load_report()
+    brand_summary = load_brand_summary()
+    approvals_df = load_approvals()
 
     return df, brand_summary, approvals_df
 
-def load_todos():
-    if TODO_FILE.exists():
-        return pd.read_csv(TODO_FILE)
 
-    return pd.DataFrame(columns=[
-        "ID",
-        "Tache",
-        "Description",
-        "Assigne",
-        "Statut",
-        "Priorite",
-        "Cree_par",
-        "Date_creation",
-        "Date_completion"
-    ])
-
-
-def save_todos(todos_df):
-    todos_df.to_csv(TODO_FILE, index=False)
-    
-def load_processed_brands(all_brands):
-    if BRAND_SETTINGS_FILE.exists():
-        settings_df = pd.read_csv(BRAND_SETTINGS_FILE)
-
-        if "Brand" in settings_df.columns:
-            saved_brands = settings_df["Brand"].dropna().tolist()
-            return [brand for brand in saved_brands if brand in all_brands]
-
-    return all_brands
-
-
-def save_processed_brands(processed_brands):
-    settings_df = pd.DataFrame({
-        "Brand": processed_brands
-    })
-
-    settings_df.to_csv(BRAND_SETTINGS_FILE, index=False)
+def ensure_columns(dataframe, columns):
+    for column in columns:
+        if column not in dataframe.columns:
+            dataframe[column] = ""
+    return dataframe
 
 df, brand_summary, approvals_df = load_dashboard_data()
+df = ensure_columns(df, [
+    "Internal_Variant_ID",
+    "Brand",
+    "FC_Title_Short",
+    "SKU",
+    "UPC",
+    "Score",
+    "Priorité",
+    "Type de correction",
+    "Erreurs critiques",
+    "Erreurs majeures",
+    "Erreurs mineures",
+    "Alertes catalogue",
+])
+brand_summary = ensure_columns(brand_summary, ["Brand"])
 full_df = df.copy()
 all_brands = sorted(df["Brand"].dropna().unique())
 
 processed_brands = load_processed_brands(all_brands)
 
 produits_ecom = len(full_df)
-produits_a_ignorer = len(
-    full_df[~full_df["Brand"].isin(processed_brands)]
+
+approved_pairs = set(
+    zip(
+        approvals_df["Internal_Variant_ID"].astype(str),
+        approvals_df["Erreur"].astype(str),
+    )
 )
+
+IGNORED_WHEN_APPROVED_ERRORS = {
+    "Produit invisible — vérifier si volontaire",
+    "Produit invisible - vérifier si volontaire",
+}
+
+
+def is_ignored_product(row):
+    variant_id = str(row.get("Internal_Variant_ID", ""))
+    return any(
+        (variant_id, error) in approved_pairs
+        for error in IGNORED_WHEN_APPROVED_ERRORS
+    )
+
+
+full_df["Produit ignoré"] = full_df.apply(is_ignored_product, axis=1)
 
 if st.session_state.role == "admin":
     processed_brands = st.sidebar.multiselect(
@@ -160,7 +182,15 @@ display_brands = st.sidebar.multiselect(
     default=processed_brands
 )
 
-df = df[df["Brand"].isin(display_brands)]
+ignored_by_brand = ~full_df["Brand"].isin(processed_brands)
+ignored_by_approval = full_df["Produit ignoré"]
+produits_a_ignorer = int((ignored_by_brand | ignored_by_approval).sum())
+ignored_products_df = full_df[ignored_by_approval].copy()
+
+df = full_df[
+    full_df["Brand"].isin(display_brands)
+    & (full_df["Produit ignoré"] == False)
+].copy()
 
 page = st.radio(
     "Navigation",
@@ -168,18 +198,29 @@ page = st.radio(
     horizontal=True
 )
 
-
-approved_pairs = set(
-    zip(
-        approvals_df["Internal_Variant_ID"].astype(str),
-        approvals_df["Erreur"].astype(str),
-    )
-)
-
 def clean(value):
     if pd.isna(value) or str(value).strip() in ["", "None", "nan"]:
         return ""
     return str(value).strip()
+
+
+def safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def toggle_row_state(state_key, row_id):
+    if st.session_state.get(state_key) == row_id:
+        st.session_state[state_key] = None
+    else:
+        st.session_state[state_key] = row_id
+
+
+def table_cell(value):
+    st.write(clean(value))
+
 
 def split_error_list(value):
     value = clean(value)
@@ -237,32 +278,114 @@ if page == "📊 Overview":
 
     st.divider()
 
+    if st.session_state.role == "admin":
+        with st.expander(
+            f"Produits ignorés individuellement ({len(ignored_products_df)})"
+        ):
+            if ignored_products_df.empty:
+                st.info("Aucun produit ignoré individuellement.")
+            else:
+                ignored_search = st.text_input(
+                    "Recherche produit ignoré",
+                    key="ignored_products_search"
+                )
+
+                visible_ignored_df = ignored_products_df.copy()
+                if ignored_search:
+                    ignored_search_lower = ignored_search.lower()
+                    visible_ignored_df = visible_ignored_df[
+                        visible_ignored_df.apply(
+                            lambda row: ignored_search_lower
+                            in " ".join(row.fillna("").astype(str)).lower(),
+                            axis=1
+                        )
+                    ]
+
+                displayed_ignored_df = (
+                    visible_ignored_df
+                    .head(100)
+                    .reset_index(drop=True)
+                )
+
+                if visible_ignored_df.empty:
+                    st.info("Aucun produit ignoré ne correspond à la recherche.")
+                else:
+                    st.caption(f"Affichage des {len(displayed_ignored_df)} premiers produits ignorés filtrés.")
+
+                    header = st.columns([0.6, 1.3, 3, 1.1, 1.1, 1.2])
+                    header[0].markdown("")
+                    header[1].markdown("**Marque**")
+                    header[2].markdown("**Produit**")
+                    header[3].markdown("**SKU**")
+                    header[4].markdown("**UPC**")
+                    header[5].markdown("**Priorité**")
+
+                    with st.container(height=420):
+                        for _, row in displayed_ignored_df.iterrows():
+                            variant_id = str(row.get("Internal_Variant_ID", ""))
+                            brand = clean(row.get("Brand", ""))
+                            title = clean(row.get("FC_Title_Short", ""))
+                            sku = clean(row.get("SKU", ""))
+                            upc = clean(row.get("UPC", ""))
+                            priority = clean(row.get("Priorité", ""))
+                            is_open = st.session_state.get("open_ignored_row") == variant_id
+
+                            row_cols = st.columns([0.35, 1.3, 3, 1.1, 1.1, 1.2])
+                            row_cols[0].button(
+                                "▾" if is_open else "▸",
+                                key=f"toggle_ignored_{variant_id}",
+                                on_click=toggle_row_state,
+                                args=("open_ignored_row", variant_id),
+                            )
+                            with row_cols[1]:
+                                table_cell(brand)
+                            with row_cols[2]:
+                                table_cell(title)
+                            with row_cols[3]:
+                                table_cell(sku)
+                            with row_cols[4]:
+                                table_cell(upc)
+                            with row_cols[5]:
+                                table_cell(priority)
+
+                            if is_open:
+                                with st.container(border=True):
+                                    st.write(clean(row.get("Alertes catalogue", "")))
+
+                                    if st.button(
+                                        "Rétablir ce produit",
+                                        key=f"restore_ignored_{variant_id}"
+                                    ):
+                                        for error in IGNORED_WHEN_APPROVED_ERRORS:
+                                            remove_approval(variant_id, error)
+                                        st.success("Produit rétabli.")
+                                        st.rerun()
+
     # Historique des audits
-    if os.path.exists(HISTORY_FILE):
-        history_df = pd.read_csv(HISTORY_FILE)
+    history_df = load_history()
 
-        if not history_df.empty:
-            history_df["Date"] = pd.to_datetime(
-                history_df["Date"],
-                format="mixed"
-            )
+    if not history_df.empty:
+        history_df["Date"] = pd.to_datetime(
+            history_df["Date"],
+            format="mixed"
+        )
 
-            history_df = history_df.sort_values("Date").reset_index(drop=True)
-            history_df["Date_str"] = history_df["Date"].dt.strftime("%Y-%m-%d %H:%M")
+        history_df = history_df.sort_values("Date").reset_index(drop=True)
+        history_df["Date_str"] = history_df["Date"].dt.strftime("%Y-%m-%d %H:%M")
 
-            st.subheader("📈 Progression des audits")
+        st.subheader("📈 Progression des audits")
 
-            last_audit = history_df.iloc[-1]
+        last_audit = history_df.iloc[-1]
 
-            st.success(
-                f"Dernier audit : {last_audit['Date'].strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        st.success(
+            f"Dernier audit : {last_audit['Date'].strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
-            if len(history_df) >= 2:
-                available_dates = history_df["Date"].tolist()
-                today_row = history_df.iloc[-1]
+        if len(history_df) >= 2:
+            available_dates = history_df["Date"].tolist()
+            today_row = history_df.iloc[-1]
 
-                col_a, col_b, col_c = st.columns([3,1,1])
+            col_a, col_b, col_c = st.columns([3,1,1])
 
             with col_a:
                 selected_compare_day = st.date_input(
@@ -287,42 +410,41 @@ if page == "📊 Overview":
                     f"Audit utilisé : {compare_date.strftime('%Y-%m-%d %H:%M')}"
                 )
 
-                with col_b:
-                    start_date = st.date_input(
-                        "Début du graphique",
-                        value=history_df["Date"].dt.date.min(),
-                        min_value=history_df["Date"].dt.date.min(),
-                        max_value=history_df["Date"].dt.date.max()
-                    )
-
-                with col_c:
-                    end_date = st.date_input(
-                        "Fin du graphique",
-                        value=history_df["Date"].dt.date.max(),
-                        min_value=history_df["Date"].dt.date.min(),
-                        max_value=history_df["Date"].dt.date.max()
-                    )
-
-
-                d1, d2, d3 = st.columns(3)
-
-                d1.metric(
-                    f"Conformes vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
-                    int(today_row["Conformes"]),
-                    int(today_row["Conformes"] - compare_row["Conformes"])
+            with col_b:
+                start_date = st.date_input(
+                    "Début du graphique",
+                    value=history_df["Date"].dt.date.min(),
+                    min_value=history_df["Date"].dt.date.min(),
+                    max_value=history_df["Date"].dt.date.max()
                 )
 
-                d2.metric(
-                    f"Action requise vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
-                    int(today_row["Action_requise"]),
-                    int(today_row["Action_requise"] - compare_row["Action_requise"])
+            with col_c:
+                end_date = st.date_input(
+                    "Fin du graphique",
+                    value=history_df["Date"].dt.date.max(),
+                    min_value=history_df["Date"].dt.date.min(),
+                    max_value=history_df["Date"].dt.date.max()
                 )
 
-                d3.metric(
-                    f"Critiques vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
-                    int(today_row["Critiques"]),
-                    int(today_row["Critiques"] - compare_row["Critiques"])
-                )
+            d1, d2, d3 = st.columns(3)
+
+            d1.metric(
+                f"Conformes vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
+                int(today_row["Conformes"]),
+                int(today_row["Conformes"] - compare_row["Conformes"])
+            )
+
+            d2.metric(
+                f"Action requise vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
+                int(today_row["Action_requise"]),
+                int(today_row["Action_requise"] - compare_row["Action_requise"])
+            )
+
+            d3.metric(
+                f"Critiques vs {compare_date.strftime('%Y-%m-%d %H:%M')}",
+                int(today_row["Critiques"]),
+                int(today_row["Critiques"] - compare_row["Critiques"])
+            )
 
             graph_df = history_df[
                 (history_df["Date"].dt.date >= start_date)
@@ -348,21 +470,22 @@ if page == "📊 Overview":
 
                 fig_history.update_xaxes(title="Audit")
                 fig_history.update_yaxes(title="Nombre")
-                
+
                 fig_history.update_layout(
                     autosize=True,
                     height=500,
                     width=None,
                     margin=dict(l=20, r=20, t=60, b=80)
                 )
-                
+
                 st.container().plotly_chart(
                     fig_history,
                     use_container_width=True
                 )
-                
             else:
                 st.info("Choisis une plage avec au moins deux audits pour afficher le graphique.")
+        else:
+            st.info("Un seul audit disponible pour l'instant.")
 
 
     st.divider()
@@ -461,95 +584,112 @@ if page == "❌ Erreurs":
     st.write(f"Produits affichés : {len(filtered_df)}")
     st.subheader("📦 Produits")
 
-    visible_columns = [
-        "Brand",
-        "FC_Title_Short",
-        "SKU",
-        "UPC",
-        "Score",
-        "Priorité",
-        "Type de correction",
-        "Erreurs restantes",
-        "Erreurs approuvées",
-    ]
-    available_visible_columns = [col for col in visible_columns if col in filtered_df.columns]
-
-    st.dataframe(
-        filtered_df[available_visible_columns],
-        hide_index=True,
-        height=500,
-        width="stretch"
+    display_limit = st.selectbox(
+        "Nombre de résultats affichés",
+        [50, 100, 200],
+        index=1
     )
 
-    st.divider()
-    st.subheader("📌 Détails des erreurs")
+    displayed_products_df = (
+        filtered_df
+        .head(display_limit)
+        .reset_index(drop=True)
+    )
 
-    detail_df = filtered_df.head(100)
-    st.caption("Affichage des 100 premiers produits filtrés.")
+    if filtered_df.empty:
+        st.info("Aucun produit ne correspond aux filtres.")
+    else:
+        st.caption(f"Affichage des {len(displayed_products_df)} premiers produits filtrés.")
 
-    for _, row in detail_df.iterrows():
-        variant_id = str(row.get("Internal_Variant_ID", ""))
-        brand = clean(row.get("Brand", ""))
-        title = clean(row.get("FC_Title_Short", ""))
-        sku = clean(row.get("SKU", ""))
+        header = st.columns([0.35, 1.2, 2.8, 1, 1, 0.8, 1.2, 0.8, 0.8])
+        header[0].markdown("")
+        header[1].markdown("**Marque**")
+        header[2].markdown("**Produit**")
+        header[3].markdown("**SKU**")
+        header[4].markdown("**UPC**")
+        header[5].markdown("**Score**")
+        header[6].markdown("**Priorité**")
+        header[7].markdown("**Rest.**")
+        header[8].markdown("**Appr.**")
 
-        unresolved = unresolved_errors(row)
-        approved = approved_errors(row)
+        with st.container(height=620):
+            for _, row in displayed_products_df.iterrows():
+                variant_id = str(row.get("Internal_Variant_ID", ""))
+                brand = clean(row.get("Brand", ""))
+                title = clean(row.get("FC_Title_Short", ""))
+                sku = clean(row.get("SKU", ""))
+                upc = clean(row.get("UPC", ""))
+                score = clean(row.get("Score", ""))
+                priority = clean(row.get("Priorité", ""))
+                correction_type = clean(row.get("Type de correction", ""))
+                remaining = safe_int(row.get("Erreurs restantes", 0))
+                approved_count = safe_int(row.get("Erreurs approuvées", 0))
+                is_open = st.session_state.get("open_error_row") == variant_id
 
-        label_icon = "✅" if len(unresolved) == 0 and len(approved) > 0 else "⚠️"
-        label = f"{label_icon} {brand} — {title} — {sku}"
+                row_cols = st.columns([0.35, 1.2, 2.8, 1, 1, 0.8, 1.2, 0.8, 0.8])
+                row_cols[0].button(
+                    "▾" if is_open else "▸",
+                    key=f"toggle_error_{variant_id}",
+                    on_click=toggle_row_state,
+                    args=("open_error_row", variant_id),
+                )
+                with row_cols[1]:
+                    table_cell(brand)
+                with row_cols[2]:
+                    table_cell(title)
+                with row_cols[3]:
+                    table_cell(sku)
+                with row_cols[4]:
+                    table_cell(upc)
+                with row_cols[5]:
+                    table_cell(score)
+                with row_cols[6]:
+                    table_cell(priority)
+                with row_cols[7]:
+                    table_cell(remaining)
+                with row_cols[8]:
+                    table_cell(approved_count)
 
-        with st.expander(label):
-            if unresolved:
-                st.markdown("### À traiter")
+                if is_open:
+                    unresolved = unresolved_errors(row)
+                    approved = approved_errors(row)
 
-                for err_type, err in unresolved:
-                    st.write(f"**{err_type}** — {err}")
+                    with st.container(border=True):
+                        if correction_type:
+                            st.caption(correction_type)
 
-                    if st.button(
-                        "Approuver cette erreur",
-                        key=f"approve_{variant_id}_{err_type}_{err}"
-                    ):
-                        new_row = pd.DataFrame([{
-                            "Internal_Variant_ID": variant_id,
-                            "Type": err_type,
-                            "Erreur": err,
-                            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }])
+                        if unresolved:
+                            st.markdown("##### À traiter")
 
-                        approvals_df = pd.concat(
-                            [approvals_df, new_row],
-                            ignore_index=True
-                        ).drop_duplicates(
-                            subset=["Internal_Variant_ID", "Erreur"],
-                            keep="last"
-                        )
+                            for err_type, err in unresolved:
+                                col_error, col_action = st.columns([4, 1])
+                                with col_error:
+                                    st.write(f"**{err_type}** — {err}")
+                                with col_action:
+                                    if st.button(
+                                        "Approuver",
+                                        key=f"approve_{variant_id}_{err_type}_{err}"
+                                    ):
+                                        approve_error(variant_id, err_type, err)
+                                        st.success("Erreur approuvée.")
+                                        st.rerun()
+                        else:
+                            st.success("Aucune erreur restante pour ce produit.")
 
-                        approvals_df.to_csv(APPROVALS_FILE, index=False)
-                        st.success("Erreur approuvée.")
-                        st.rerun()
-            else:
-                st.success("Aucune erreur restante pour ce produit.")
-
-            if approved:
-                st.markdown("### Déjà approuvées")
-                for err_type, err in approved:
-                    st.write(f"✅ **{err_type}** — {err}")
-
-                    if st.button(
-                        "Retirer l'approbation",
-                        key=f"remove_{variant_id}_{err_type}_{err}"
-                    ):
-                        approvals_df = approvals_df[
-                            ~(
-                                (approvals_df["Internal_Variant_ID"].astype(str) == variant_id)
-                                & (approvals_df["Erreur"].astype(str) == err)
-                            )
-                        ]
-
-                        approvals_df.to_csv(APPROVALS_FILE, index=False)
-                        st.warning("Approbation retirée.")
-                        st.rerun()
+                        if approved:
+                            st.markdown("##### Déjà approuvées")
+                            for err_type, err in approved:
+                                col_error, col_action = st.columns([4, 1])
+                                with col_error:
+                                    st.write(f"✅ **{err_type}** — {err}")
+                                with col_action:
+                                    if st.button(
+                                        "Retirer",
+                                        key=f"remove_{variant_id}_{err_type}_{err}"
+                                    ):
+                                        remove_approval(variant_id, err)
+                                        st.warning("Approbation retirée.")
+                                        st.rerun()
 if page == "📋 To-Do List":
     st.divider()
     st.header("📋 To-Do List")
