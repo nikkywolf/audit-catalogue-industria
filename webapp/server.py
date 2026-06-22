@@ -7,9 +7,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -456,17 +454,35 @@ def openai_file_upload_jsonl(path: Path) -> dict[str, Any]:
 
 
 def openai_file_content(file_id: str) -> str:
-    request = Request(
-        f"https://api.openai.com/v1/files/{file_id}/content",
-        headers={"Authorization": f"Bearer {openai_api_key()}"},
-        method="GET",
-    )
     try:
-        with urlopen(request, timeout=120) as response:
-            return response.read().decode("utf-8")
-    except HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"Lecture fichier OpenAI refusée: {body_text}")
+        result = subprocess.run(
+            [
+                "curl",
+                "-sS",
+                "-H", f"Authorization: Bearer {openai_api_key()}",
+                f"https://api.openai.com/v1/files/{file_id}/content",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Lecture fichier OpenAI impossible: {exc}")
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=502, detail=f"Lecture fichier OpenAI échouée: {result.stderr}")
+
+    stripped = result.stdout.lstrip()
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = {}
+        if "error" in payload:
+            raise HTTPException(status_code=502, detail=f"Lecture fichier OpenAI refusée: {payload['error']}")
+
+    return result.stdout
 
 
 def product_matches_search(row: dict[str, Any], search: str) -> bool:

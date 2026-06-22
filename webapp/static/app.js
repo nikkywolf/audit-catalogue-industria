@@ -651,7 +651,8 @@ async function setup() {
       await loadGptBatchPage();
     });
     $("#syncGptBatch").addEventListener("click", async () => {
-      await api("/api/gpt-batches/sync", { method: "POST" });
+      const result = await api("/api/gpt-batches/sync", { method: "POST" });
+      window.alert(`${result.synced || 0} résultat(s) récupéré(s).`);
       await loadGptBatchPage();
     });
     $("#resetSubmittedBatch").addEventListener("click", async () => {
