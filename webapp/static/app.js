@@ -520,6 +520,14 @@ async function loadBatchSubmitted() {
     false,
     true
   );
+  const selectAll = document.querySelector("[data-reset-batch-select-all]");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      document.querySelectorAll("[data-reset-batch-item]").forEach((checkbox) => {
+        checkbox.checked = selectAll.checked;
+      });
+    });
+  }
 }
 
 async function loadBatchCompleted() {
@@ -535,7 +543,7 @@ async function loadBatchCompleted() {
 }
 
 function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false) {
-  const selectionHeader = withSelection ? "<th></th>" : "";
+  const selectionHeader = withSelection ? '<th><input type="checkbox" data-reset-batch-select-all /></th>' : "";
   return `
     <div class="muted table-count">${escapeHtml(countLabel)}</div>
     <table>
