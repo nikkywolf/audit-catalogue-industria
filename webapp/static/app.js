@@ -548,10 +548,17 @@ async function loadBatchApproved() {
   const search = encodeURIComponent($("#batchApprovedSearch").value);
   const data = await api(`/api/gpt-batches/items?status=approved&search=${search}&limit=200`);
   state.batchApproved = data.items;
-  $("#batchApprovedTable").innerHTML = batchItemsTableHtml(data.items, `Approuvés : ${data.total}`, false);
+  $("#batchApprovedTable").innerHTML = batchItemsTableHtml(data.items, `Approuvés : ${data.total}`, false, false, true);
+  document.querySelectorAll("[data-restore-batch]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/gpt-batches/items/${encodeURIComponent(button.dataset.restoreBatch)}/restore`, { method: "POST" });
+      await loadBatchCompleted();
+      await loadBatchApproved();
+    });
+  });
 }
 
-function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false) {
+function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false, withRestore = false) {
   const selectionHeader = withSelection ? '<th><input type="checkbox" data-reset-batch-select-all /></th>' : "";
   return `
     <div class="muted table-count">${escapeHtml(countLabel)}</div>
@@ -573,7 +580,9 @@ function batchItemsTableHtml(items, countLabel, withApprove, withSelection = fal
               <td>
                 ${withApprove && url
                   ? `<a class="button-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" data-approve-batch="${escapeHtml(item.Internal_Variant_ID)}">Approuver</a>`
-                  : escapeHtml(item.batch_id || "")}
+                  : withRestore
+                    ? `<button type="button" data-restore-batch="${escapeHtml(item.Internal_Variant_ID)}">Rétablir</button>`
+                    : escapeHtml(item.batch_id || "")}
               </td>
             </tr>
           `;

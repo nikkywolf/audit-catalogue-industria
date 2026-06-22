@@ -1127,6 +1127,26 @@ def api_gpt_batch_approve(
     return {"ok": True}
 
 
+@app.post("/api/gpt-batches/items/{variant_id}/restore")
+def api_gpt_batch_restore(
+    variant_id: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_batch_tables()
+    with connect() as conn:
+        result = conn.execute(
+            """
+            UPDATE gpt_batch_items
+            SET status = 'completed',
+                updated_at = ?
+            WHERE Internal_Variant_ID = ? AND status = 'approved'
+            """,
+            (now_text(), variant_id),
+        )
+    return {"ok": True, "updated": result.rowcount}
+
+
 @app.get("/api/todos")
 def api_todos():
     with connect() as conn:
