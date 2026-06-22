@@ -830,6 +830,17 @@ def api_gpt_batch_queue(
     return {"ok": True, "created": created}
 
 
+@app.delete("/api/gpt-batches/pending")
+def api_gpt_batch_clear_pending(
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_batch_tables()
+    with connect() as conn:
+        result = conn.execute("DELETE FROM gpt_batch_items WHERE status = 'pending'")
+    return {"ok": True, "deleted": int(result.rowcount or 0)}
+
+
 @app.get("/api/gpt-batches/items")
 def api_gpt_batch_items(
     status: str = "pending",

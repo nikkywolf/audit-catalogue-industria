@@ -13,6 +13,7 @@ const state = {
   ignoredBrandsTotal: 0,
   batchCandidates: [],
   batchPending: [],
+  batchSubmitted: [],
   batchCompleted: [],
 };
 
@@ -502,11 +503,20 @@ async function loadBatchCandidates() {
 
 async function loadBatchPending() {
   const data = await api("/api/gpt-batches/items?status=pending&limit=200");
-  const submitted = await api("/api/gpt-batches/items?status=submitted&limit=200");
-  state.batchPending = [...data.items, ...submitted.items];
+  state.batchPending = data.items;
   $("#batchPendingTable").innerHTML = batchItemsTableHtml(
     state.batchPending,
-    `En attente/soumis : ${data.total + submitted.total}`,
+    `En attente : ${data.total}`,
+    false
+  );
+}
+
+async function loadBatchSubmitted() {
+  const data = await api("/api/gpt-batches/items?status=submitted&limit=200");
+  state.batchSubmitted = data.items;
+  $("#batchSubmittedTable").innerHTML = batchItemsTableHtml(
+    state.batchSubmitted,
+    `Envoyés à OpenAI : ${data.total}`,
     false
   );
 }
@@ -553,6 +563,7 @@ function batchItemsTableHtml(items, countLabel, withApprove) {
 async function loadGptBatchPage() {
   await loadBatchCandidates();
   await loadBatchPending();
+  await loadBatchSubmitted();
   await loadBatchCompleted();
 }
 
@@ -608,10 +619,21 @@ async function setup() {
     $("#submitGptBatch").addEventListener("click", async () => {
       const ok = window.confirm("Envoyer les produits en attente à l'API OpenAI Batch?");
       if (!ok) return;
-      await api("/api/gpt-batches/submit", {
+      const result = await api("/api/gpt-batches/submit", {
         method: "POST",
-        body: JSON.stringify({ limit: 100 }),
+        body: JSON.stringify({ limit: 50 }),
       });
+      if (result.batch_id) {
+        window.alert(`${result.count} produits envoyés à OpenAI.`);
+      } else if (result.message) {
+        window.alert(result.message);
+      }
+      await loadGptBatchPage();
+    });
+    $("#clearPendingBatch").addEventListener("click", async () => {
+      const ok = window.confirm("Vider tous les produits en attente? Les batchs déjà envoyés à OpenAI ne seront pas touchés.");
+      if (!ok) return;
+      await api("/api/gpt-batches/pending", { method: "DELETE" });
       await loadGptBatchPage();
     });
     $("#syncGptBatch").addEventListener("click", async () => {

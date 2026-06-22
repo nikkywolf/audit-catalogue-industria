@@ -88,10 +88,20 @@
             <h3>Produits batchs en attente</h3>
             <div class="toolbar">
               <button id="submitGptBatch">Envoyer batch API</button>
-              <button id="syncGptBatch">Récupérer résultats</button>
+              <button id="clearPendingBatch" class="danger-button">Vider l'attente</button>
             </div>
           </div>
           <div id="batchPendingTable" class="table-wrap compact"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits batchs envoyés</h3>
+            <div class="toolbar">
+              <button id="syncGptBatch">Récupérer résultats</button>
+            </div>
+          </div>
+          <div id="batchSubmittedTable" class="table-wrap compact"></div>
         </section>
 
         <section class="panel">
