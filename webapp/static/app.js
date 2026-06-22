@@ -538,8 +538,17 @@ async function loadBatchCompleted() {
   document.querySelectorAll("[data-approve-batch]").forEach((button) => {
     button.addEventListener("click", async () => {
       await api(`/api/gpt-batches/items/${encodeURIComponent(button.dataset.approveBatch)}/approve`, { method: "POST" });
+      await loadBatchCompleted();
+      await loadBatchApproved();
     });
   });
+}
+
+async function loadBatchApproved() {
+  const search = encodeURIComponent($("#batchApprovedSearch").value);
+  const data = await api(`/api/gpt-batches/items?status=approved&search=${search}&limit=200`);
+  state.batchApproved = data.items;
+  $("#batchApprovedTable").innerHTML = batchItemsTableHtml(data.items, `Approuvés : ${data.total}`, false);
 }
 
 function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false) {
@@ -579,6 +588,7 @@ async function loadGptBatchPage() {
   await loadBatchPending();
   await loadBatchSubmitted();
   await loadBatchCompleted();
+  await loadBatchApproved();
 }
 
 async function setup() {
@@ -623,6 +633,8 @@ async function setup() {
     $("#batchCandidateSearch").addEventListener("input", () => reloadBatchCandidates());
     const reloadBatchCompleted = debounce(() => loadBatchCompleted());
     $("#batchCompletedSearch").addEventListener("input", () => reloadBatchCompleted());
+    const reloadBatchApproved = debounce(() => loadBatchApproved());
+    $("#batchApprovedSearch").addEventListener("input", () => reloadBatchApproved());
     $("#queueBatchCandidates").addEventListener("click", async () => {
       await api("/api/gpt-batches/queue", {
         method: "POST",
