@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -322,24 +323,40 @@ def openai_api_key() -> str:
 
 
 def openai_request(path: str, payload: Optional[dict[str, Any]] = None, method: str = "POST") -> dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = Request(
+    args = [
+        "curl",
+        "-sS",
+        "-X", method,
         f"https://api.openai.com{path}",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {openai_api_key()}",
-            "Content-Type": "application/json",
-        },
-        method=method,
-    )
+        "-H", f"Authorization: Bearer {openai_api_key()}",
+        "-H", "Content-Type: application/json",
+    ]
+    if payload is not None:
+        args += ["-d", json.dumps(payload, ensure_ascii=False)]
+
     try:
-        with urlopen(request, timeout=90) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"OpenAI a refusé la requête: {body}")
+        result = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Erreur OpenAI: {exc}")
+        raise HTTPException(status_code=502, detail=f"Requête OpenAI impossible: {exc}")
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=502, detail=f"Requête OpenAI échouée: {result.stderr}")
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail=f"Réponse OpenAI invalide: {result.stdout[:500]}")
+
+    if "error" in data:
+        raise HTTPException(status_code=502, detail=f"OpenAI refusé: {data['error']}")
+
+    return data
 
 
 def call_openai_json(messages: list[dict[str, str]]) -> dict[str, Any]:
@@ -401,32 +418,37 @@ def batch_item_summary(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def openai_file_upload_jsonl(path: Path) -> dict[str, Any]:
-    boundary = "----industria" + uuid.uuid4().hex
-    body_prefix = (
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="purpose"\r\n\r\n'
-        "batch\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
-        "Content-Type: application/jsonl\r\n\r\n"
-    ).encode("utf-8")
-    body_suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    body = body_prefix + path.read_bytes() + body_suffix
-    request = Request(
-        "https://api.openai.com/v1/files",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {openai_api_key()}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
     try:
-        with urlopen(request, timeout=120) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"Upload OpenAI refusé: {body_text}")
+        result = subprocess.run(
+            [
+                "curl",
+                "-sS",
+                "-X", "POST",
+                "https://api.openai.com/v1/files",
+                "-H", f"Authorization: Bearer {openai_api_key()}",
+                "-F", "purpose=batch",
+                "-F", f"file=@{path}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Upload OpenAI impossible: {exc}")
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=502, detail=f"Upload OpenAI échoué: {result.stderr}")
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail=f"Réponse OpenAI invalide: {result.stdout[:500]}")
+
+    if "error" in payload:
+        raise HTTPException(status_code=502, detail=f"Upload OpenAI refusé: {payload['error']}")
+
+    return payload
 
 
 def openai_file_content(file_id: str) -> str:
