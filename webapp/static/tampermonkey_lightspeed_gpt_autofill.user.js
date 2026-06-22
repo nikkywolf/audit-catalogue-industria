@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lightspeed GPT Autofill
 // @namespace    industria
-// @version      2.1
+// @version      2.2
 // @match        https://industria-coiffure-641699.shoplightspeed.com/*
 // @match        https://*.shoplightspeed.com/*
 // @downloadURL  https://dashboardindustria.com/static/tampermonkey_lightspeed_gpt_autofill.user.js
@@ -398,15 +398,6 @@
 
     known.Tags = true;
 
-    if (Object.prototype.hasOwnProperty.call(data, "Tags")) {
-      result = setTagsField(data.Tags, onlyEmpty);
-      if (result === "filled") summary.filled.push("Tags");
-      else if (result === "skipped_existing") summary.skippedExisting.push("Tags");
-      else summary.missing.push("Tags");
-    } else {
-      summary.skipped.push("Tags");
-    }
-
     for (key in data) {
       if (Object.prototype.hasOwnProperty.call(data, key) && !known[key]) {
         summary.unknown.push(key);
@@ -581,8 +572,7 @@
       '  "FC_Meta_Title": "Meta title FC",\n' +
       '  "FC_Meta_Description": "Meta description FC",\n' +
       '  "FC_Meta_Keywords": "mots cles",\n' +
-      '  "FC_Google_Category": "Health & Beauty > Personal Care > Hair Care",\n' +
-      '  "Tags": "MATRIX | COLOR OBSESSED"\n' +
+      '  "FC_Google_Category": "Health & Beauty > Personal Care > Hair Care"\n' +
       "}";
   }
 

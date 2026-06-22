@@ -292,13 +292,13 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
         "FC_URL", "FR_Meta_Title", "FR_Meta_Description", "FR_Meta_Keywords",
         "FR_Google_Category", "US_Meta_Title", "US_Meta_Description",
         "US_Meta_Keywords", "US_Google_Category", "FC_Meta_Title",
-        "FC_Meta_Description", "FC_Meta_Keywords", "FC_Google_Category", "Tags",
+        "FC_Meta_Description", "FC_Meta_Keywords", "FC_Google_Category",
     ]
     system_prompt = (
         "Tu es l'assistant catalogue Industria. Génère uniquement un objet JSON valide, "
         "sans markdown, sans texte avant ou après. Respecte exactement les champs attendus "
         "par Lightspeed. Les descriptions longues peuvent contenir du HTML valide. "
-        "N'inclus pas Produits Associés dans le JSON. Mets les tags dans la clé Tags si des tags sont pertinents."
+        "N'inclus pas Produits Associés dans le JSON. N'inclus jamais Tags, tags, filtres ou produits associés dans le JSON."
     )
     extra_rules_path = PROJECT_DIR / "product_gpt_rules.md"
     extra_rules = extra_rules_path.read_text(encoding="utf-8") if extra_rules_path.exists() else ""
@@ -312,6 +312,67 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
     ]
+
+
+def title_needs_sku_suffix(row: dict[str, Any]) -> bool:
+    brand = clean(row.get("Brand")).lower()
+    text = " ".join(
+        clean(row.get(column)).lower()
+        for column in [
+            "Brand",
+            "FC_Title_Short",
+            "FR_Title_Short",
+            "US_Title_Short",
+            "FC_Title_Long",
+            "Product_Title",
+            "Type de correction",
+        ]
+    )
+    tool_keywords = [
+        "fer plat",
+        "séchoir",
+        "sechoir",
+        "fer à friser",
+        "fer a friser",
+        "fer à boucler",
+        "fer a boucler",
+        "brosse chauffante",
+        "tondeuse",
+        "flat iron",
+        "dryer",
+        "curling iron",
+        "curling wand",
+        "hot brush",
+        "clipper",
+        "trimmer",
+    ]
+    return "dannyco" in brand or any(keyword in text for keyword in tool_keywords)
+
+
+def sanitize_gpt_json(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(payload)
+    for key in list(cleaned):
+        if key.lower() == "tags":
+            cleaned.pop(key, None)
+
+    sku = clean(row.get("SKU")) or clean(row.get("Internal_ID"))
+    if not sku or not title_needs_sku_suffix(row):
+        return cleaned
+
+    sku_lower = sku.lower()
+    for key in [
+        "FR_Title_Short",
+        "FR_Title_Long",
+        "US_Title_Short",
+        "US_Title_Long",
+        "FC_Title_Short",
+        "FC_Title_Long",
+    ]:
+        value = clean(cleaned.get(key))
+        if value and sku_lower not in value.lower():
+            cleaned[key] = f"{value} - {sku}"
+
+    return cleaned
 
 
 def openai_api_key() -> str:
@@ -641,7 +702,7 @@ def api_product_autofill_json(
     row = find_product(variant_id)
     if not row:
         raise HTTPException(status_code=404, detail="Produit introuvable")
-    return call_openai_json(product_autofill_prompt(row))
+    return sanitize_gpt_json(row, call_openai_json(product_autofill_prompt(row)))
 
 
 @app.get("/api/products/{variant_id}/batch-json")
@@ -662,7 +723,8 @@ def api_product_batch_json(
         ).fetchone()
     if not item or not item["result_json"]:
         raise HTTPException(status_code=404, detail="JSON batch introuvable pour ce produit")
-    return json.loads(item["result_json"])
+    row = find_product(variant_id) or {}
+    return sanitize_gpt_json(row, json.loads(item["result_json"]))
 
 
 @app.post("/api/approvals")
@@ -1075,7 +1137,9 @@ def api_gpt_batch_sync(
                 body = response.get("body") or {}
                 try:
                     result_text = body["choices"][0]["message"]["content"]
-                    result_json = json.dumps(json.loads(result_text), ensure_ascii=False, indent=2)
+                    row = find_product(custom_id) or {}
+                    result_payload = sanitize_gpt_json(row, json.loads(result_text))
+                    result_json = json.dumps(result_payload, ensure_ascii=False, indent=2)
                     conn.execute(
                         """
                         UPDATE gpt_batch_items
