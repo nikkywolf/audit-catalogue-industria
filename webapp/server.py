@@ -42,9 +42,9 @@ USERS = {
 app = FastAPI(title="Industria Catalogue Audit")
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.shoplightspeed\.com",
+    allow_origin_regex=r"https://(.*\.shoplightspeed\.com|dashboardindustria\.com)",
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
