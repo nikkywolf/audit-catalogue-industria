@@ -41,7 +41,7 @@ app = FastAPI(title="Industria Catalogue Audit")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://(.*\.shoplightspeed\.com|dashboardindustria\.com)",
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
