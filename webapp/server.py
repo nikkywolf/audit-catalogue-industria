@@ -100,6 +100,10 @@ class BatchSubmitPayload(BaseModel):
     limit: int = 100
 
 
+class BatchResetPayload(BaseModel):
+    variant_ids: list[str]
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -828,6 +832,37 @@ def api_gpt_batch_queue(
             )
             created += int(result.rowcount or 0)
     return {"ok": True, "created": created}
+
+
+@app.post("/api/gpt-batches/reset")
+def api_gpt_batch_reset_items(
+    payload: BatchResetPayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_batch_tables()
+    variant_ids = [str(item) for item in payload.variant_ids if str(item).strip()]
+    if not variant_ids:
+        return {"ok": True, "updated": 0}
+
+    placeholders = ",".join("?" for _ in variant_ids)
+    now = now_text()
+    with connect() as conn:
+        result = conn.execute(
+            f"""
+            UPDATE gpt_batch_items
+            SET status = 'pending',
+                batch_id = '',
+                custom_id = '',
+                request_json = '',
+                error = '',
+                updated_at = ?
+            WHERE status IN ('submitted', 'error')
+              AND Internal_Variant_ID IN ({placeholders})
+            """,
+            [now, *variant_ids],
+        )
+    return {"ok": True, "updated": int(result.rowcount or 0)}
 
 
 @app.delete("/api/gpt-batches/pending")

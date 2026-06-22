@@ -517,7 +517,8 @@ async function loadBatchSubmitted() {
   $("#batchSubmittedTable").innerHTML = batchItemsTableHtml(
     state.batchSubmitted,
     `Envoyés à OpenAI : ${data.total}`,
-    false
+    false,
+    true
   );
 }
 
@@ -533,16 +534,21 @@ async function loadBatchCompleted() {
   });
 }
 
-function batchItemsTableHtml(items, countLabel, withApprove) {
+function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false) {
+  const selectionHeader = withSelection ? "<th></th>" : "";
   return `
     <div class="muted table-count">${escapeHtml(countLabel)}</div>
     <table>
-      <thead><tr><th>Marque</th><th>Produit</th><th>SKU</th><th>Statut</th><th>Action</th></tr></thead>
+      <thead><tr>${selectionHeader}<th>Marque</th><th>Produit</th><th>SKU</th><th>Statut</th><th>Action</th></tr></thead>
       <tbody>
         ${items.map((item) => {
           const url = withApprove ? buildBatchAutofillLightspeedUrl(item) : "";
+          const selectionCell = withSelection
+            ? `<td><input type="checkbox" data-reset-batch-item="${escapeHtml(item.Internal_Variant_ID)}" /></td>`
+            : "";
           return `
             <tr>
+              ${selectionCell}
               <td>${escapeHtml(item.Brand)}</td>
               <td>${escapeHtml(item.Product_Title)}</td>
               <td>${escapeHtml(item.SKU)}</td>
@@ -554,7 +560,7 @@ function batchItemsTableHtml(items, countLabel, withApprove) {
               </td>
             </tr>
           `;
-        }).join("") || '<tr><td colspan="5" class="muted">Aucun produit.</td></tr>'}
+        }).join("") || `<tr><td colspan="${withSelection ? 6 : 5}" class="muted">Aucun produit.</td></tr>`}
       </tbody>
     </table>
   `;
@@ -638,6 +644,21 @@ async function setup() {
     });
     $("#syncGptBatch").addEventListener("click", async () => {
       await api("/api/gpt-batches/sync", { method: "POST" });
+      await loadGptBatchPage();
+    });
+    $("#resetSubmittedBatch").addEventListener("click", async () => {
+      const selectedIds = [...document.querySelectorAll("[data-reset-batch-item]:checked")].map((input) => input.dataset.resetBatchItem);
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit envoyé à réinitialiser.");
+        return;
+      }
+      const ok = window.confirm(`Réinitialiser ${selectedIds.length} produit(s) envoyé(s) vers la table en attente?`);
+      if (!ok) return;
+      const result = await api("/api/gpt-batches/reset", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds }),
+      });
+      window.alert(`${result.updated} produit(s) réinitialisé(s).`);
       await loadGptBatchPage();
     });
   }
