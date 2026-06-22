@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -245,13 +246,35 @@ def find_product(variant_id: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def product_internal_id(row: dict[str, Any]) -> str:
+    return clean(row.get("Internal_ID"))
+
+
+def matrix_product_ids(products: Optional[list[dict[str, Any]]] = None) -> set[str]:
+    products = products or load_products()
+    variants_by_product: dict[str, set[str]] = {}
+    for row in products:
+        internal_id = product_internal_id(row)
+        variant_id = product_id(row)
+        if internal_id and variant_id:
+            variants_by_product.setdefault(internal_id, set()).add(variant_id)
+    return {internal_id for internal_id, variants in variants_by_product.items() if len(variants) > 1}
+
+
+def is_matrix_product(row: dict[str, Any], matrix_ids: Optional[set[str]] = None) -> bool:
+    internal_id = product_internal_id(row)
+    if not internal_id:
+        return False
+    return internal_id in (matrix_ids if matrix_ids is not None else matrix_product_ids())
+
+
 def lightspeed_admin_url(row: dict[str, Any]) -> str:
-    product_internal_id = clean(row.get("Internal_ID"))
-    if not product_internal_id:
+    internal_id = product_internal_id(row)
+    if not internal_id:
         return ""
     return LIGHTSPEED_ADMIN_PRODUCT_URL_TEMPLATE.format(
-        product_id=product_internal_id,
-        internal_id=product_internal_id,
+        product_id=internal_id,
+        internal_id=internal_id,
         variant_id=product_id(row).replace("!ID:", ""),
     )
 
@@ -302,10 +325,18 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
     )
     extra_rules_path = PROJECT_DIR / "product_gpt_rules.md"
     extra_rules = extra_rules_path.read_text(encoding="utf-8") if extra_rules_path.exists() else ""
+    product_context = dict(row)
+    product_context["Industria_Is_Matrix_Product"] = is_matrix_product(row)
+    product_context["Industria_Matrix_Title_Rule"] = (
+        "Ce produit fait partie d'une matrice Lightspeed: ne mets aucun format et aucun SKU/code produit "
+        "dans les titres courts ou longs. Les variantes partagent la même fiche e-com."
+        if product_context["Industria_Is_Matrix_Product"]
+        else ""
+    )
     user_prompt = {
         "task": "Créer le JSON de remplissage Lightspeed pour ce produit.",
         "expected_keys": schema_keys,
-        "product": row,
+        "product": product_context,
         "extra_rules": extra_rules,
     }
     return [
@@ -315,6 +346,8 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def title_needs_sku_suffix(row: dict[str, Any]) -> bool:
+    if is_matrix_product(row):
+        return False
     brand = clean(row.get("Brand")).lower()
     text = " ".join(
         clean(row.get(column)).lower()
@@ -349,25 +382,40 @@ def title_needs_sku_suffix(row: dict[str, Any]) -> bool:
     return "dannyco" in brand or any(keyword in text for keyword in tool_keywords)
 
 
+def remove_title_format(value: str) -> str:
+    text = clean(value)
+    # Matrices share one e-com product page, so titles should not include variant-specific sizes or codes.
+    text = re.sub(r"\s*-\s*[A-Za-z0-9._/]+$", "", text).strip()
+    text = re.sub(r"\s*\([^)]*(?:ml|oz|g|gr|kg|l|un|po|in|mm|cm|w|v|°|inch|ounces?)[^)]*\)\s*$", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
 def sanitize_gpt_json(row: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(payload)
     for key in list(cleaned):
         if key.lower() == "tags":
             cleaned.pop(key, None)
 
-    sku = clean(row.get("SKU")) or clean(row.get("Internal_ID"))
-    if not sku or not title_needs_sku_suffix(row):
-        return cleaned
-
-    sku_lower = sku.lower()
-    for key in [
+    title_keys = [
         "FR_Title_Short",
         "FR_Title_Long",
         "US_Title_Short",
         "US_Title_Long",
         "FC_Title_Short",
         "FC_Title_Long",
-    ]:
+    ]
+    if is_matrix_product(row):
+        for key in title_keys:
+            if clean(cleaned.get(key)):
+                cleaned[key] = remove_title_format(cleaned[key])
+        return cleaned
+
+    sku = clean(row.get("SKU")) or clean(row.get("Internal_ID"))
+    if not sku or not title_needs_sku_suffix(row):
+        return cleaned
+
+    sku_lower = sku.lower()
+    for key in title_keys:
         value = clean(cleaned.get(key))
         if value and sku_lower not in value.lower():
             cleaned[key] = f"{value} - {sku}"
@@ -835,15 +883,26 @@ def api_gpt_batch_candidates(
     ensure_batch_tables()
     approvals = load_approvals()
     processed_brands = load_processed_brands()
+    products = load_products()
+    matrix_ids = matrix_product_ids(products)
     candidates = []
     with connect() as conn:
         existing = {
             row["Internal_Variant_ID"]
             for row in conn.execute("SELECT Internal_Variant_ID FROM gpt_batch_items").fetchall()
         }
-    for row in load_products():
+        existing_internal_ids = {
+            row["Internal_ID"]
+            for row in conn.execute("SELECT Internal_ID FROM gpt_batch_items WHERE Internal_ID != ''").fetchall()
+        }
+    seen_matrix_ids: set[str] = set()
+    for row in products:
+        internal_id = product_internal_id(row)
         if product_id(row) in existing:
             continue
+        if is_matrix_product(row, matrix_ids):
+            if internal_id in existing_internal_ids or internal_id in seen_matrix_ids:
+                continue
         if clean(row.get("Brand")) not in processed_brands:
             continue
         if is_ignored_by_approval(row, approvals):
@@ -854,6 +913,8 @@ def api_gpt_batch_candidates(
             continue
         if not is_batch_correctable(row):
             continue
+        if is_matrix_product(row, matrix_ids):
+            seen_matrix_ids.add(internal_id)
         candidates.append(batch_item_summary(row))
     return {"total": len(candidates), "items": candidates[: min(limit, 500)]}
 
@@ -867,25 +928,57 @@ def api_gpt_batch_queue(
     ensure_batch_tables()
     products = load_products()
     product_map = {product_id(row): row for row in products}
+    matrix_ids = matrix_product_ids(products)
     selected_ids = payload.variant_ids
     if not selected_ids:
         approvals = load_approvals()
         processed_brands = load_processed_brands()
-        selected_ids = [
-            product_id(row)
-            for row in products
-            if clean(row.get("Brand")) in processed_brands
-            and not is_ignored_by_approval(row, approvals)
-            and not is_masked_product(row)
-            and is_batch_correctable(row)
-        ][: max(1, min(payload.limit, 500))]
+        seen_matrix_ids: set[str] = set()
+        selected_ids = []
+        for row in products:
+            internal_id = product_internal_id(row)
+            if is_matrix_product(row, matrix_ids):
+                if internal_id in seen_matrix_ids:
+                    continue
+            if (
+                clean(row.get("Brand")) in processed_brands
+                and not is_ignored_by_approval(row, approvals)
+                and not is_masked_product(row)
+                and is_batch_correctable(row)
+            ):
+                if is_matrix_product(row, matrix_ids):
+                    seen_matrix_ids.add(internal_id)
+                selected_ids.append(product_id(row))
+            if len(selected_ids) >= max(1, min(payload.limit, 500)):
+                break
+
+    filtered_ids = []
+    seen_matrix_ids = set()
+    for variant_id in selected_ids:
+        row = product_map.get(variant_id)
+        if not row:
+            continue
+        internal_id = product_internal_id(row)
+        if is_matrix_product(row, matrix_ids):
+            if internal_id in seen_matrix_ids:
+                continue
+            seen_matrix_ids.add(internal_id)
+        filtered_ids.append(variant_id)
+    selected_ids = filtered_ids
 
     created = 0
     now = now_text()
     with connect() as conn:
+        existing_internal_ids = {
+            row["Internal_ID"]
+            for row in conn.execute("SELECT Internal_ID FROM gpt_batch_items WHERE Internal_ID != ''").fetchall()
+        }
         for variant_id in selected_ids[:500]:
             row = product_map.get(variant_id)
             if not row:
+                continue
+            internal_id = product_internal_id(row)
+            if is_matrix_product(row, matrix_ids) and internal_id in existing_internal_ids:
                 continue
             if is_masked_product(row):
                 continue
@@ -909,6 +1002,8 @@ def api_gpt_batch_queue(
                 ),
             )
             created += int(result.rowcount or 0)
+            if result.rowcount and is_matrix_product(row, matrix_ids):
+                existing_internal_ids.add(internal_id)
     return {"ok": True, "created": created}
 
 
@@ -1018,14 +1113,22 @@ def api_gpt_batch_submit(
     batch_lines = []
     now = now_text()
     request_by_variant = {}
+    matrix_ids = matrix_product_ids()
+    submitted_matrix_ids: set[str] = set()
     for item in rows:
         row = find_product(item["Internal_Variant_ID"])
         if not row:
             continue
+        internal_id = product_internal_id(row)
+        if is_matrix_product(row, matrix_ids):
+            if internal_id in submitted_matrix_ids:
+                continue
         if is_masked_product(row):
             continue
         if not is_batch_correctable(row):
             continue
+        if is_matrix_product(row, matrix_ids):
+            submitted_matrix_ids.add(internal_id)
         custom_id = str(item["Internal_Variant_ID"])
         request_body = {
             "model": os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),

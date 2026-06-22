@@ -38,6 +38,11 @@ Pour tous les produits de marque Dannyco et pour tous les outils coiffants, incl
 Format strict : Titre existant - SKU
 Exemple : Nano-Titane | Séchoir Céramique (1un) - BNT5547C
 
+RÈGLE SPÉCIALE PRODUITS EN MATRICE
+Si le produit est identifié comme produit en matrice, ses variantes partagent la même fiche produit e-commerce.
+Dans ce cas, tu ne dois JAMAIS inclure de format, de taille, de couleur, de variante, de SKU ou de code produit dans les titres courts et longs.
+Le titre doit rester générique pour la fiche principale.
+
 FR — DESCRIPTION COURTE
 Maximum 254 caractères.
 
