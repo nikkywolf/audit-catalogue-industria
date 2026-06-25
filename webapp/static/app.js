@@ -15,6 +15,7 @@ const state = {
   batchPending: [],
   batchSubmitted: [],
   batchCompleted: [],
+  batchCompletedSelectedIds: new Set(),
   selectedProductIds: new Set(),
 };
 
@@ -243,6 +244,7 @@ function renderProductDetail(id, data) {
   if (!container) return;
   const unresolved = data.unresolved.map((item) => errorActionHtml(id, item, "approve")).join("");
   const approved = data.approved.map((item) => errorActionHtml(id, item, "remove")).join("");
+  const sourceInfo = data.source_info || {};
   container.innerHTML = `
     <div class="detail-grid">
       <div>
@@ -251,6 +253,13 @@ function renderProductDetail(id, data) {
         <span class="pill">UPC ${escapeHtml(data.product.UPC)}</span>
       </div>
       ${data.product["Type de correction"] ? `<div class="muted">${escapeHtml(data.product["Type de correction"])}</div>` : ""}
+      ${isAdmin() ? `<div class="source-editor">
+        <h4>Infos produit / sources GPT</h4>
+        <input data-source-url="${escapeHtml(id)}" type="url" placeholder="Lien source officiel ou fournisseur" value="${escapeHtml(sourceInfo.source_url || "")}" />
+        <textarea data-source-text="${escapeHtml(id)}" rows="5" placeholder="Colle ici la vraie description fournisseur, les bénéfices officiels, technologies, mode d'emploi ou notes fiables. GPT devra se baser sur ces infos.">${escapeHtml(sourceInfo.source_text || "")}</textarea>
+        <button type="button" data-save-source="${escapeHtml(id)}">Sauvegarder les infos produit</button>
+        ${sourceInfo.updated_at ? `<span class="muted">Sauvegardé : ${escapeHtml(sourceInfo.updated_at)}</span>` : ""}
+      </div>` : ""}
       <div>
         <h4>À traiter</h4>
         ${unresolved || '<div class="ok">Aucune erreur restante.</div>'}
@@ -264,6 +273,22 @@ function renderProductDetail(id, data) {
   container.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", () => handleErrorAction(button));
   });
+  const sourceButton = container.querySelector("[data-save-source]");
+  if (sourceButton) {
+    sourceButton.addEventListener("click", async () => {
+      const variantId = sourceButton.dataset.saveSource;
+      await api(`/api/products/${encodeURIComponent(variantId)}/source-info`, {
+        method: "PUT",
+        body: JSON.stringify({
+          source_url: container.querySelector("[data-source-url]").value,
+          source_text: container.querySelector("[data-source-text]").value,
+        }),
+      });
+      window.alert("Infos produit sauvegardées.");
+      const refreshed = await api(`/api/products/${encodeURIComponent(variantId)}`);
+      renderProductDetail(variantId, refreshed);
+    });
+  }
 }
 
 function productDetailLink(product) {
@@ -554,12 +579,14 @@ async function loadBatchSubmitted() {
     state.batchSubmitted,
     `Envoyés à OpenAI : ${data.total}`,
     false,
-    true
+    true,
+    false,
+    "submitted"
   );
-  const selectAll = document.querySelector("[data-reset-batch-select-all]");
+  const selectAll = document.querySelector("[data-batch-select-all='submitted']");
   if (selectAll) {
     selectAll.addEventListener("change", () => {
-      document.querySelectorAll("[data-reset-batch-item]").forEach((checkbox) => {
+      document.querySelectorAll("[data-batch-select='submitted']").forEach((checkbox) => {
         checkbox.checked = selectAll.checked;
       });
     });
@@ -570,7 +597,7 @@ async function loadBatchCompleted() {
   const search = encodeURIComponent($("#batchCompletedSearch").value);
   const data = await api(`/api/gpt-batches/items?status=completed&search=${search}&limit=200`);
   state.batchCompleted = data.items;
-  $("#batchCompletedTable").innerHTML = batchItemsTableHtml(data.items, `Terminés : ${data.total}`, true);
+  $("#batchCompletedTable").innerHTML = batchItemsTableHtml(data.items, `Terminés : ${data.total}`, true, true, false, "completed");
   document.querySelectorAll("[data-approve-batch]").forEach((button) => {
     button.addEventListener("click", async () => {
       await api(`/api/gpt-batches/items/${encodeURIComponent(button.dataset.approveBatch)}/approve`, { method: "POST" });
@@ -578,6 +605,14 @@ async function loadBatchCompleted() {
       await loadBatchApproved();
     });
   });
+  const selectAll = document.querySelector("[data-batch-select-all='completed']");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      document.querySelectorAll("[data-batch-select='completed']").forEach((checkbox) => {
+        checkbox.checked = selectAll.checked;
+      });
+    });
+  }
 }
 
 async function loadBatchApproved() {
@@ -594,8 +629,8 @@ async function loadBatchApproved() {
   });
 }
 
-function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false, withRestore = false) {
-  const selectionHeader = withSelection ? '<th><input type="checkbox" data-reset-batch-select-all /></th>' : "";
+function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false, withRestore = false, selectionKind = "batch") {
+  const selectionHeader = withSelection ? `<th><input type="checkbox" data-batch-select-all="${escapeHtml(selectionKind)}" /></th>` : "";
   return `
     <div class="muted table-count">${escapeHtml(countLabel)}</div>
     <table>
@@ -604,7 +639,7 @@ function batchItemsTableHtml(items, countLabel, withApprove, withSelection = fal
         ${items.map((item) => {
           const url = withApprove ? buildBatchAutofillLightspeedUrl(item) : "";
           const selectionCell = withSelection
-            ? `<td><input type="checkbox" data-reset-batch-item="${escapeHtml(item.Internal_Variant_ID)}" /></td>`
+            ? `<td><input type="checkbox" data-batch-select="${escapeHtml(selectionKind)}" value="${escapeHtml(item.Internal_Variant_ID)}" /></td>`
             : "";
           return `
             <tr>
@@ -730,7 +765,7 @@ async function setup() {
       await loadGptBatchPage();
     });
     $("#resetSubmittedBatch").addEventListener("click", async () => {
-      const selectedIds = [...document.querySelectorAll("[data-reset-batch-item]:checked")].map((input) => input.dataset.resetBatchItem);
+      const selectedIds = [...document.querySelectorAll("[data-batch-select='submitted']:checked")].map((input) => input.value);
       if (selectedIds.length === 0) {
         window.alert("Sélectionne au moins un produit envoyé à réinitialiser.");
         return;
@@ -742,6 +777,21 @@ async function setup() {
         body: JSON.stringify({ variant_ids: selectedIds }),
       });
       window.alert(`${result.updated} produit(s) réinitialisé(s).`);
+      await loadGptBatchPage();
+    });
+    $("#resetCompletedBatch").addEventListener("click", async () => {
+      const selectedIds = [...document.querySelectorAll("[data-batch-select='completed']:checked")].map((input) => input.value);
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit terminé à remettre en attente.");
+        return;
+      }
+      const ok = window.confirm(`Remettre ${selectedIds.length} produit(s) terminé(s) en attente pour les renvoyer à GPT?`);
+      if (!ok) return;
+      const result = await api("/api/gpt-batches/reset", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds }),
+      });
+      window.alert(`${result.updated} produit(s) remis en attente.`);
       await loadGptBatchPage();
     });
   }

@@ -358,6 +358,26 @@ th {
   border-bottom: 1px solid var(--line);
 }
 
+.source-editor {
+  display: grid;
+  gap: 8px;
+  max-width: 980px;
+}
+
+.source-editor h4 {
+  margin: 0;
+}
+
+.source-editor input,
+.source-editor textarea {
+  width: 100%;
+}
+
+.source-editor textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
 @media (max-width: 1000px) {
   .sidebar {
     position: static;

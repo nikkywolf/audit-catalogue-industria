@@ -90,6 +90,11 @@ class BrandPayload(BaseModel):
     brand: str
 
 
+class ProductSourcePayload(BaseModel):
+    source_text: str = ""
+    source_url: str = ""
+
+
 class BatchQueuePayload(BaseModel):
     variant_ids: list[str] = []
     limit: int = 50
@@ -151,6 +156,20 @@ def ensure_batch_tables() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(gpt_batch_items)").fetchall()}
         if "force_submit" not in columns:
             conn.execute("ALTER TABLE gpt_batch_items ADD COLUMN force_submit INTEGER NOT NULL DEFAULT 0")
+
+
+def ensure_product_source_table() -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_sources (
+                Internal_Variant_ID TEXT PRIMARY KEY,
+                source_text TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def current_user(x_remote_user: Optional[str] = Header(default=None)) -> dict[str, str]:
@@ -312,6 +331,18 @@ def summarize_product(row: dict[str, Any], approvals: set[tuple[str, str]]) -> d
     }
 
 
+def product_source_info(variant_id: str) -> dict[str, str]:
+    ensure_product_source_table()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT source_text, source_url, updated_at FROM product_sources WHERE Internal_Variant_ID = ?",
+            (variant_id,),
+        ).fetchone()
+    if not row:
+        return {"source_text": "", "source_url": "", "updated_at": ""}
+    return dict(row)
+
+
 def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
     schema_keys = [
         "FR_Title_Short", "FR_Title_Long", "US_Title_Short", "US_Title_Long",
@@ -327,7 +358,10 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
         "Tu es l'assistant catalogue Industria. Génère uniquement un objet JSON valide, "
         "sans markdown, sans texte avant ou après. Respecte exactement les champs attendus "
         "par Lightspeed. Les descriptions longues peuvent contenir du HTML valide. "
-        "N'inclus pas Produits Associés dans le JSON. N'inclus jamais Tags, tags, filtres ou produits associés dans le JSON."
+        "N'inclus pas Produits Associés dans le JSON. N'inclus jamais Tags, tags, filtres ou produits associés dans le JSON. "
+        "N'invente jamais de bénéfices, technologies, ingrédients, matériaux, parfums, promesses ou modes d'utilisation. "
+        "Les descriptions doivent s'appuyer seulement sur les infos produit/source fournies et sur le contenu déjà présent dans la fiche. "
+        "Si les sources sont insuffisantes, laisse les champs de description vides plutôt que de produire une description générique."
     )
     extra_rules_path = PROJECT_DIR / "product_gpt_rules.md"
     extra_rules = extra_rules_path.read_text(encoding="utf-8") if extra_rules_path.exists() else ""
@@ -339,6 +373,7 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
         if product_context["Industria_Is_Matrix_Product"]
         else ""
     )
+    product_context["Industria_Product_Source_Info"] = product_source_info(product_id(row))
     user_prompt = {
         "task": "Créer le JSON de remplissage Lightspeed pour ce produit.",
         "expected_keys": schema_keys,
@@ -745,8 +780,34 @@ def api_product_detail(variant_id: str):
                 item for item in errors
                 if (variant_id, item["error"]) in approvals
             ],
+            "source_info": product_source_info(variant_id),
         }
     raise HTTPException(status_code=404, detail="Produit introuvable")
+
+
+@app.put("/api/products/{variant_id}/source-info")
+def api_save_product_source_info(
+    variant_id: str,
+    payload: ProductSourcePayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    if not find_product(variant_id):
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+    ensure_product_source_table()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO product_sources (Internal_Variant_ID, source_text, source_url, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(Internal_Variant_ID) DO UPDATE SET
+                source_text = excluded.source_text,
+                source_url = excluded.source_url,
+                updated_at = excluded.updated_at
+            """,
+            (variant_id, payload.source_text.strip(), payload.source_url.strip(), now_text()),
+        )
+    return {"ok": True}
 
 
 @app.get("/api/products/{variant_id}/autofill-json")
@@ -1066,9 +1127,11 @@ def api_gpt_batch_reset_items(
                 batch_id = '',
                 custom_id = '',
                 request_json = '',
+                result_json = '',
                 error = '',
+                force_submit = 1,
                 updated_at = ?
-            WHERE status IN ('submitted', 'error')
+            WHERE status IN ('submitted', 'error', 'completed', 'approved')
               AND Internal_Variant_ID IN ({placeholders})
             """,
             [now, *variant_ids],
