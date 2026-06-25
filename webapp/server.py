@@ -93,10 +93,12 @@ class BrandPayload(BaseModel):
 class BatchQueuePayload(BaseModel):
     variant_ids: list[str] = []
     limit: int = 50
+    force: bool = False
 
 
 class BatchSubmitPayload(BaseModel):
     limit: int = 100
+    variant_ids: list[str] = []
 
 
 class BatchResetPayload(BaseModel):
@@ -130,6 +132,7 @@ def ensure_batch_tables() -> None:
                 request_json TEXT DEFAULT '',
                 result_json TEXT DEFAULT '',
                 error TEXT DEFAULT '',
+                force_submit INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -145,6 +148,9 @@ def ensure_batch_tables() -> None:
             );
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(gpt_batch_items)").fetchall()}
+        if "force_submit" not in columns:
+            conn.execute("ALTER TABLE gpt_batch_items ADD COLUMN force_submit INTEGER NOT NULL DEFAULT 0")
 
 
 def current_user(x_remote_user: Optional[str] = Header(default=None)) -> dict[str, str]:
@@ -931,6 +937,7 @@ def api_gpt_batch_queue(
     products = load_products()
     product_map = {product_id(row): row for row in products}
     matrix_ids = matrix_product_ids(products)
+    force = bool(payload.force)
     selected_ids = payload.variant_ids
     if not selected_ids:
         approvals = load_approvals()
@@ -982,16 +989,16 @@ def api_gpt_batch_queue(
             internal_id = product_internal_id(row)
             if is_matrix_product(row, matrix_ids) and internal_id in existing_internal_ids:
                 continue
-            if is_masked_product(row):
+            if not force and is_masked_product(row):
                 continue
-            if not is_batch_correctable(row):
+            if not force and not is_batch_correctable(row):
                 continue
             summary = batch_item_summary(row)
             result = conn.execute(
                 """
                 INSERT OR IGNORE INTO gpt_batch_items
-                (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, status, force_submit, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                 """,
                 (
                     summary["Internal_Variant_ID"],
@@ -999,14 +1006,43 @@ def api_gpt_batch_queue(
                     summary["Brand"],
                     summary["Product_Title"],
                     summary["SKU"],
+                    1 if force else 0,
                     now,
                     now,
                 ),
             )
             created += int(result.rowcount or 0)
+            if not result.rowcount and force:
+                conn.execute(
+                    """
+                    UPDATE gpt_batch_items
+                    SET force_submit = 1,
+                        updated_at = ?
+                    WHERE Internal_Variant_ID = ?
+                      AND status = 'pending'
+                    """,
+                    (now, summary["Internal_Variant_ID"]),
+                )
             if result.rowcount and is_matrix_product(row, matrix_ids):
                 existing_internal_ids.add(internal_id)
     return {"ok": True, "created": created}
+
+
+@app.post("/api/gpt-batches/queue-and-submit")
+def api_gpt_batch_queue_and_submit(
+    payload: BatchQueuePayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    queue_result = api_gpt_batch_queue(
+        BatchQueuePayload(variant_ids=payload.variant_ids, limit=payload.limit, force=True),
+        x_remote_user=x_remote_user,
+    )
+    submit_result = api_gpt_batch_submit(
+        BatchSubmitPayload(limit=max(1, min(len(payload.variant_ids) or payload.limit, 500)), variant_ids=payload.variant_ids),
+        x_remote_user=x_remote_user,
+    )
+    return {"ok": True, "queued": queue_result.get("created", 0), **submit_result}
 
 
 @app.post("/api/gpt-batches/reset")
@@ -1098,16 +1134,31 @@ def api_gpt_batch_submit(
     ensure_batch_tables()
     limit = max(1, min(payload.limit, 500))
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM gpt_batch_items
-            WHERE status = 'pending'
-            ORDER BY created_at
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if payload.variant_ids:
+            variant_ids = [str(item) for item in payload.variant_ids if str(item).strip()]
+            placeholders = ",".join("?" for _ in variant_ids)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM gpt_batch_items
+                WHERE status = 'pending'
+                  AND Internal_Variant_ID IN ({placeholders})
+                ORDER BY created_at
+                LIMIT ?
+                """,
+                [*variant_ids, limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM gpt_batch_items
+                WHERE status = 'pending'
+                ORDER BY created_at
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
 
     if not rows:
         return {"ok": True, "message": "Aucun produit en attente."}
@@ -1121,13 +1172,14 @@ def api_gpt_batch_submit(
         row = find_product(item["Internal_Variant_ID"])
         if not row:
             continue
+        force = bool(item["force_submit"]) if "force_submit" in item.keys() else False
         internal_id = product_internal_id(row)
         if is_matrix_product(row, matrix_ids):
             if internal_id in submitted_matrix_ids:
                 continue
-        if is_masked_product(row):
+        if not force and is_masked_product(row):
             continue
-        if not is_batch_correctable(row):
+        if not force and not is_batch_correctable(row):
             continue
         if is_matrix_product(row, matrix_ids):
             submitted_matrix_ids.add(internal_id)

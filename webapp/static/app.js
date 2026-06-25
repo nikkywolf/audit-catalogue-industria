@@ -15,6 +15,7 @@ const state = {
   batchPending: [],
   batchSubmitted: [],
   batchCompleted: [],
+  selectedProductIds: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -148,13 +149,27 @@ async function loadProducts() {
   renderProducts();
 }
 
+function updateProductBatchSelectionUi() {
+  const selectedCount = state.selectedProductIds.size;
+  const button = $("#sendSelectedProductsBatch");
+  const count = $("#selectedProductsCount");
+  if (button) button.disabled = selectedCount === 0;
+  if (count) count.textContent = selectedCount ? `${selectedCount} sélectionné(s)` : "";
+  const selectAll = document.querySelector("[data-select-visible-products]");
+  if (selectAll) {
+    const visibleIds = state.productRows.map((row) => row.Internal_Variant_ID);
+    selectAll.checked = visibleIds.length > 0 && visibleIds.every((id) => state.selectedProductIds.has(id));
+  }
+}
+
 function renderProducts() {
   const rows = state.productRows;
+  const selectionHeader = isAdmin() ? '<th><input type="checkbox" data-select-visible-products /></th>' : "";
   $("#productsTable").innerHTML = `
     <table>
       <thead>
         <tr>
-          <th></th><th>Marque</th><th>Produit</th><th>SKU</th><th>UPC</th>
+          ${selectionHeader}<th></th><th>Marque</th><th>Produit</th><th>SKU</th><th>UPC</th>
           <th class="num">Score</th><th>Priorité</th><th class="num">Rest.</th><th class="num">Appr.</th><th class="admin-only">GPT</th>
         </tr>
       </thead>
@@ -166,6 +181,24 @@ function renderProducts() {
   document.querySelectorAll("[data-toggle-product]").forEach((button) => {
     button.addEventListener("click", () => toggleProduct(button.dataset.toggleProduct));
   });
+  document.querySelectorAll("[data-select-product]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.selectedProductIds.add(checkbox.dataset.selectProduct);
+      else state.selectedProductIds.delete(checkbox.dataset.selectProduct);
+      updateProductBatchSelectionUi();
+    });
+  });
+  const selectVisible = document.querySelector("[data-select-visible-products]");
+  if (selectVisible) {
+    selectVisible.addEventListener("change", () => {
+      state.productRows.forEach((row) => {
+        if (selectVisible.checked) state.selectedProductIds.add(row.Internal_Variant_ID);
+        else state.selectedProductIds.delete(row.Internal_Variant_ID);
+      });
+      renderProducts();
+    });
+  }
+  updateProductBatchSelectionUi();
 }
 
 function productRowHtml(row) {
@@ -180,6 +213,7 @@ function productRowHtml(row) {
     : "";
   return `
     <tr>
+      ${isAdmin() ? `<td><input type="checkbox" data-select-product="${escapeHtml(id)}" ${state.selectedProductIds.has(id) ? "checked" : ""} /></td>` : ""}
       <td><button class="toggle" data-toggle-product="${escapeHtml(id)}">${isOpen ? "▾" : "▸"}</button></td>
       <td>${escapeHtml(row.Brand)}</td>
       <td>${productCell}</td>
@@ -191,7 +225,7 @@ function productRowHtml(row) {
       <td class="num">${escapeHtml(row["Erreurs approuvées"])}</td>
       <td class="admin-only">${gptButton}</td>
     </tr>
-    ${isOpen ? `<tr class="details"><td colspan="${isAdmin() ? 10 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
+    ${isOpen ? `<tr class="details"><td colspan="${isAdmin() ? 11 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
   `;
 }
 
@@ -646,6 +680,23 @@ async function setup() {
     $("#batchCompletedSearch").addEventListener("input", () => reloadBatchCompleted());
     const reloadBatchApproved = debounce(() => loadBatchApproved());
     $("#batchApprovedSearch").addEventListener("input", () => reloadBatchApproved());
+    $("#sendSelectedProductsBatch").addEventListener("click", async () => {
+      const selectedIds = [...state.selectedProductIds];
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit.");
+        return;
+      }
+      const ok = window.confirm(`Envoyer ${selectedIds.length} produit(s) sélectionné(s) en batch GPT?`);
+      if (!ok) return;
+      const result = await api("/api/gpt-batches/queue-and-submit", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length, force: true }),
+      });
+      state.selectedProductIds.clear();
+      window.alert(result.batch_id ? `${result.count || 0} produit(s) envoyé(s) à OpenAI.` : (result.message || "Aucun produit envoyé."));
+      await loadProducts();
+      await loadGptBatchPage();
+    });
     $("#queueBatchCandidates").addEventListener("click", async () => {
       await api("/api/gpt-batches/queue", {
         method: "POST",

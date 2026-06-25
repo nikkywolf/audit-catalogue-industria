@@ -9,7 +9,6 @@ BASE_DIR = Path(__file__).resolve().parent
 
 FILES_TO_SYNC = [
     "exports",
-    "industria_catalogue.db",
     "industria_export_sync.db",
     "rapport_qualite_catalogue.csv",
     "rapport_qualite_catalogue.xlsx",
