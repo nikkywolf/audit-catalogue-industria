@@ -4,9 +4,10 @@ import subprocess
 import shutil
 from datetime import datetime
 
-DOWNLOAD_FOLDER = os.path.expanduser(
-    "~/Downloads/audit-catalogue-industria"
-)
+DOWNLOAD_FOLDERS = [
+    os.path.expanduser("~/Downloads/audit-catalogue-industria"),
+    os.path.expanduser("~/Downloads"),
+]
 
 PROJECT_FOLDER = os.path.expanduser(
     "~/industria-apps/audit-catalogue-industria"
@@ -22,8 +23,12 @@ PROCESSED_FILE = os.path.join(
 CHECK_INTERVAL_SECONDS = 20
 DOWNLOAD_STABILITY_SECONDS = 8
 
-os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXPORTS_FOLDER, exist_ok=True)
+for folder in DOWNLOAD_FOLDERS:
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        pass
 
 def load_processed():
     if not os.path.exists(PROCESSED_FILE):
@@ -64,8 +69,9 @@ def copy_export_to_repo(path, filename):
     if not os.path.exists(destination):
         shutil.copy2(path, destination)
 
-log("Surveillance du dossier d'exports Lightspeed pour la v2...")
-log(DOWNLOAD_FOLDER)
+log("Surveillance des dossiers d'exports Lightspeed pour la v2...")
+for folder in DOWNLOAD_FOLDERS:
+    log(folder)
 log(f"Projet audité : {PROJECT_FOLDER}")
 log("Watcher actif.")
 
@@ -73,21 +79,29 @@ while True:
     try:
         processed = load_processed()
 
-        zip_files = [
-            f for f in os.listdir(DOWNLOAD_FOLDER)
-            if f.endswith(".zip")
-            and f.startswith("products_export_")
-        ]
+        zip_files = []
+        for folder in DOWNLOAD_FOLDERS:
+            try:
+                folder_files = [
+                    (folder, f)
+                    for f in os.listdir(folder)
+                    if f.endswith(".zip")
+                    and f.startswith("products_export_")
+                ]
+                zip_files.extend(folder_files)
+            except OSError as e:
+                log(f"Dossier non accessible pour le watcher: {folder} ({e})")
+                continue
 
         zip_files.sort()
 
-        for filename in zip_files:
+        for folder, filename in zip_files:
 
             if filename in processed:
                 continue
 
             full_path = os.path.join(
-                DOWNLOAD_FOLDER,
+                folder,
                 filename
             )
 
