@@ -17,19 +17,37 @@ BASE_DIR = Path(__file__).resolve().parent
 os.chdir(BASE_DIR)
 
 DOWNLOAD_FOLDER = os.path.expanduser("~/Downloads/audit-catalogue-industria")
+AUDIT_EXPORT_FILE = os.getenv("AUDIT_EXPORT_FILE", "").strip()
 
-zip_files = glob.glob(
-    os.path.join(DOWNLOAD_FOLDER, "products_export_*.zip")
-)
+if AUDIT_EXPORT_FILE:
+    if not os.path.exists(AUDIT_EXPORT_FILE):
+        raise FileNotFoundError(f"Export demandé introuvable : {AUDIT_EXPORT_FILE}")
+    if AUDIT_EXPORT_FILE.endswith(".zip"):
+        zip_files = [AUDIT_EXPORT_FILE]
+        csv_files = []
+    elif AUDIT_EXPORT_FILE.endswith(".csv"):
+        zip_files = []
+        csv_files = [AUDIT_EXPORT_FILE]
+    else:
+        raise FileNotFoundError(f"Format d'export non supporté : {AUDIT_EXPORT_FILE}")
+else:
+    zip_files = glob.glob(
+        os.path.join(DOWNLOAD_FOLDER, "products_export_*.zip")
+    )
 
-csv_files = glob.glob(
-    os.path.join(DOWNLOAD_FOLDER, "products_export_*.csv")
-)
+    csv_files = glob.glob(
+        os.path.join(DOWNLOAD_FOLDER, "products_export_*.csv")
+    )
 
 if zip_files:
     latest_zip = max(zip_files, key=os.path.getmtime)
 
-    extract_folder = os.path.join(DOWNLOAD_FOLDER, "_extracted")
+    extract_folder = os.path.join(
+        BASE_DIR,
+        ".audit_extracted",
+        "_extracted",
+        Path(latest_zip).stem,
+    )
     os.makedirs(extract_folder, exist_ok=True)
 
     with zipfile.ZipFile(latest_zip, "r") as zip_ref:

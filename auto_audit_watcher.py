@@ -113,9 +113,12 @@ while True:
             copy_export_to_repo(full_path, filename)
             log("Lancement de l'audit...")
 
+            env = os.environ.copy()
+            env["AUDIT_EXPORT_FILE"] = full_path
             result = subprocess.run(
                 ["/usr/bin/python3", "audit_catalogue.py"],
-                cwd=PROJECT_FOLDER
+                cwd=PROJECT_FOLDER,
+                env=env,
             )
 
             if result.returncode == 0:
