@@ -343,6 +343,25 @@ def product_source_info(variant_id: str) -> dict[str, str]:
     return dict(row)
 
 
+def product_source_ids(variant_ids: list[str]) -> set[str]:
+    ids = [variant_id for variant_id in variant_ids if variant_id]
+    if not ids:
+        return set()
+    ensure_product_source_table()
+    placeholders = ",".join("?" for _ in ids)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT Internal_Variant_ID
+            FROM product_sources
+            WHERE Internal_Variant_ID IN ({placeholders})
+              AND (TRIM(COALESCE(source_text, '')) != '' OR TRIM(COALESCE(source_url, '')) != '')
+            """,
+            ids,
+        ).fetchall()
+    return {row["Internal_Variant_ID"] for row in rows}
+
+
 def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
     schema_keys = [
         "FR_Title_Short", "FR_Title_Long", "US_Title_Short", "US_Title_Long",
@@ -761,6 +780,9 @@ def api_products(
         approval=approval,
     )
     page = filtered[offset: offset + min(limit, 500)]
+    source_ids = product_source_ids([item["Internal_Variant_ID"] for item in page])
+    for item in page:
+        item["Infos produit"] = "Oui" if item["Internal_Variant_ID"] in source_ids else "Non"
     return {"total": len(filtered), "items": page}
 
 

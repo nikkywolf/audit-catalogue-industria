@@ -347,6 +347,11 @@ th {
   color: var(--ok);
 }
 
+.status.ok-status {
+  background: #1d3529;
+  color: var(--ok);
+}
+
 .brand-admin-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

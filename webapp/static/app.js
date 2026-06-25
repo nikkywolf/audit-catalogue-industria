@@ -171,7 +171,7 @@ function renderProducts() {
       <thead>
         <tr>
           ${selectionHeader}<th></th><th>Marque</th><th>Produit</th><th>SKU</th><th>UPC</th>
-          <th class="num">Score</th><th>Priorité</th><th class="num">Rest.</th><th class="num">Appr.</th><th class="admin-only">GPT</th>
+          <th class="num">Score</th><th>Priorité</th><th class="num">Rest.</th><th class="num">Appr.</th><th class="admin-only">Infos produit</th><th class="admin-only">GPT</th>
         </tr>
       </thead>
       <tbody>
@@ -224,9 +224,10 @@ function productRowHtml(row) {
       <td>${escapeHtml(row.Priorité)}</td>
       <td class="num">${escapeHtml(row["Erreurs restantes"])}</td>
       <td class="num">${escapeHtml(row["Erreurs approuvées"])}</td>
+      <td class="admin-only"><span class="status ${row["Infos produit"] === "Oui" ? "ok-status" : ""}">${escapeHtml(row["Infos produit"] || "Non")}</span></td>
       <td class="admin-only">${gptButton}</td>
     </tr>
-    ${isOpen ? `<tr class="details"><td colspan="${isAdmin() ? 11 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
+    ${isOpen ? `<tr class="details"><td colspan="${isAdmin() ? 12 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
   `;
 }
 
