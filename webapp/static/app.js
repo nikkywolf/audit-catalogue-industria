@@ -75,7 +75,9 @@ async function loadBootstrap() {
   state.me = me;
   $("#userBox").textContent = `Connecté : ${me.name} | Rôle : ${me.role}`;
   applyRoleVisibility();
-  if (data.latest_sync) {
+  if (data.latest_audit) {
+    $("#syncBox").textContent = `Dernier export : ${data.latest_audit.Date} | ${data.latest_audit.Produits} produits`;
+  } else if (data.latest_sync) {
     $("#syncBox").textContent = `Dernière sync : ${data.latest_sync.status} ${data.latest_sync.finished_at || data.latest_sync.started_at}`;
   }
 

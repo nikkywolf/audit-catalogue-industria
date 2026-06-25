@@ -673,6 +673,7 @@ def api_bootstrap():
             "SELECT source, status, started_at, finished_at, message FROM sync_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
         history = [dict(row) for row in conn.execute("SELECT * FROM audit_history ORDER BY Date").fetchall()]
+        latest_audit = conn.execute("SELECT * FROM audit_history ORDER BY Date DESC LIMIT 1").fetchone()
 
     return {
         "metrics": {
@@ -690,6 +691,7 @@ def api_bootstrap():
         "correction_types": correction_types,
         "brand_summary": load_brand_summary(),
         "history": history,
+        "latest_audit": dict(latest_audit) if latest_audit else None,
         "latest_sync": dict(latest_sync) if latest_sync else None,
     }
 
