@@ -304,6 +304,20 @@ def lightspeed_admin_url(row: dict[str, Any]) -> str:
     )
 
 
+def batch_item_as_product(item: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "Internal_Variant_ID": clean(item["Internal_Variant_ID"]),
+        "Internal_ID": clean(item["Internal_ID"]),
+        "Brand": clean(item["Brand"]),
+        "FC_Title_Short": clean(item["Product_Title"]),
+        "FR_Title_Short": clean(item["Product_Title"]),
+        "US_Title_Short": clean(item["Product_Title"]),
+        "FC_Title_Long": clean(item["Product_Title"]),
+        "Product_Title": clean(item["Product_Title"]),
+        "SKU": clean(item["SKU"]),
+    }
+
+
 def is_ignored_by_approval(row: dict[str, Any], approvals: set[tuple[str, str]]) -> bool:
     variant_id = product_id(row)
     return any((variant_id, error) in approvals for error in IGNORED_WHEN_APPROVED_ERRORS)
@@ -386,10 +400,19 @@ def product_autofill_prompt(row: dict[str, Any]) -> list[dict[str, str]]:
     extra_rules = extra_rules_path.read_text(encoding="utf-8") if extra_rules_path.exists() else ""
     product_context = dict(row)
     product_context["Industria_Is_Matrix_Product"] = is_matrix_product(row)
+    product_context["Industria_Is_Set_Product"] = product_is_set(row)
     product_context["Industria_Matrix_Title_Rule"] = (
         "Ce produit fait partie d'une matrice Lightspeed: ne mets aucun format et aucun SKU/code produit "
         "dans les titres courts ou longs. Les variantes partagent la même fiche e-com."
         if product_context["Industria_Is_Matrix_Product"]
+        else ""
+    )
+    product_context["Industria_Set_Content_Rule"] = (
+        "Ce produit semble être un duo, trio, coffret, routine, ensemble, kit, bundle ou pack. "
+        "Dans chaque description longue HTML, ajoute une section CONTENU DE L'ENSEMBLE / SET INCLUDES "
+        "après la liste de bénéfices et avant UTILISATION / HOW TO USE, seulement si les items inclus "
+        "sont clairement fournis par le titre ou les sources. N'invente jamais les items inclus."
+        if product_context["Industria_Is_Set_Product"]
         else ""
     )
     product_context["Industria_Product_Source_Info"] = product_source_info(product_id(row))
@@ -429,17 +452,58 @@ def title_needs_sku_suffix(row: dict[str, Any]) -> bool:
         "fer a friser",
         "fer à boucler",
         "fer a boucler",
+        "fer professionnel",
+        "fer céramique",
+        "fer ceramique",
+        "séchoir",
         "brosse chauffante",
+        "brosse séchante",
+        "brosse sechante",
+        "styler",
+        "air styler",
         "tondeuse",
         "flat iron",
+        "hair straightener",
+        "straightener",
+        "hair dryer",
         "dryer",
+        "blow dryer",
         "curling iron",
         "curling wand",
         "hot brush",
+        "hot air brush",
         "clipper",
         "trimmer",
     ]
     return "dannyco" in brand or any(keyword in text for keyword in tool_keywords)
+
+
+def product_is_set(row: dict[str, Any]) -> bool:
+    text = " ".join(
+        clean(row.get(column)).lower()
+        for column in [
+            "FC_Title_Short",
+            "FR_Title_Short",
+            "US_Title_Short",
+            "FC_Title_Long",
+            "Product_Title",
+            "Type de correction",
+        ]
+    )
+    set_keywords = [
+        "duo",
+        "trio",
+        "coffret",
+        "routine",
+        "ensemble",
+        "kit",
+        "bundle",
+        "pack",
+        "set",
+        "gift set",
+        "value set",
+    ]
+    return any(keyword in text for keyword in set_keywords)
 
 
 def remove_title_format(value: str) -> str:
@@ -854,7 +918,7 @@ def api_product_batch_json(
     with connect() as conn:
         item = conn.execute(
             """
-            SELECT result_json
+            SELECT *
             FROM gpt_batch_items
             WHERE Internal_Variant_ID = ? AND status IN ('completed', 'approved')
             """,
@@ -862,7 +926,7 @@ def api_product_batch_json(
         ).fetchone()
     if not item or not item["result_json"]:
         raise HTTPException(status_code=404, detail="JSON batch introuvable pour ce produit")
-    row = find_product(variant_id) or {}
+    row = find_product(variant_id) or batch_item_as_product(item)
     return sanitize_gpt_json(row, json.loads(item["result_json"]))
 
 
@@ -1213,7 +1277,7 @@ def api_gpt_batch_items(
     items = [dict(row) for row in rows]
     for item in items:
         row = find_product(item["Internal_Variant_ID"])
-        item["Lightspeed_Admin_URL"] = lightspeed_admin_url(row) if row else ""
+        item["Lightspeed_Admin_URL"] = lightspeed_admin_url(row or item)
     return {"total": total, "items": items}
 
 

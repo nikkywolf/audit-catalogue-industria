@@ -37,6 +37,7 @@ RÈGLE SPÉCIALE DANNYCO / OUTILS COIFFANTS
 Pour tous les produits de marque Dannyco et pour tous les outils coiffants, incluant fer plat, séchoir, fer à friser, fer à boucler, brosse chauffante, tondeuse, clipper, trimmer et équivalents anglais, tu dois ajouter le SKU ou code produit à la fin de TOUS les titres courts et longs.
 Format strict : Titre existant - SKU
 Exemple : Nano-Titane | Séchoir Céramique (1un) - BNT5547C
+Exception obligatoire : si le produit est en matrice, cette règle ne s'applique pas. Ne mets jamais le SKU/code produit dans les titres d'un produit en matrice.
 
 RÈGLE SPÉCIALE PRODUITS EN MATRICE
 Si le produit est identifié comme produit en matrice, ses variantes partagent la même fiche produit e-commerce.
@@ -53,6 +54,16 @@ Aucun <br> sous les titres.
 
 OBLIGATION SUPPLÉMENTAIRE DESCRIPTION LONGUE
 Dans la section DESCRIPTION, tu dois TOUJOURS ajouter une liste de bénéfices en bullet points immédiatement après le paragraphe descriptif et AVANT la section UTILISATION.
+
+RÈGLE SPÉCIALE ENSEMBLES / DUOS / TRIOS / COFFRETS / ROUTINES
+Si le produit est un duo, trio, coffret, routine, ensemble, kit, bundle, pack ou tout autre produit composé de plusieurs items, la description longue HTML doit inclure une section de contenu de l'ensemble.
+Cette section doit être placée immédiatement après la liste de bénéfices en bullet points et juste avant la section UTILISATION / HOW TO USE.
+Format obligatoire :
+<h2>CONTENU DE L'ENSEMBLE</h2>
+<ul><li>Nom du produit ou item inclus</li><li>Nom du produit ou item inclus</li></ul>
+En anglais, utiliser <h2>SET INCLUDES</h2>.
+En français canadien, utiliser <h2>CONTENU DE L'ENSEMBLE</h2>.
+N'invente jamais d'items inclus. Si le contenu exact de l'ensemble n'est pas fourni dans les infos produit/source, crée la section seulement si les items inclus sont clairement identifiables dans le nom du produit ou les sources fournies.
 
 SEO
 - Inclure OBLIGATOIREMENT des meta keywords
