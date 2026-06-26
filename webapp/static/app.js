@@ -287,6 +287,12 @@ function renderProductDetail(id, data) {
       });
       window.alert("Infos produit sauvegardées.");
       const refreshed = await api(`/api/products/${encodeURIComponent(variantId)}`);
+      const row = state.productRows.find((item) => item.Internal_Variant_ID === variantId);
+      if (row) {
+        const refreshedSourceInfo = refreshed.source_info || {};
+        row["Infos produit"] = (refreshedSourceInfo.source_text || refreshedSourceInfo.source_url) ? "Oui" : "Non";
+        renderProducts();
+      }
       renderProductDetail(variantId, refreshed);
     });
   }
