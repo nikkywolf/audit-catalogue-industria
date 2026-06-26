@@ -318,6 +318,28 @@ def batch_item_as_product(item: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def batch_catalog_state(
+    row: Optional[dict[str, Any]],
+    approvals: set[tuple[str, str]],
+    processed_brands: set[str],
+) -> str:
+    if not row:
+        return "Absent export"
+    brand = clean(row.get("Brand"))
+    summary = summarize_product(row, approvals)
+    if brand not in processed_brands:
+        return "Marque ignorée"
+    if is_ignored_by_approval(row, approvals):
+        return "Ignoré"
+    if summary["Erreurs restantes"] <= 0:
+        return "Plus d'erreur"
+    if is_masked_product(row):
+        return "Masqué"
+    if not is_batch_correctable(row):
+        return "Non JSON"
+    return "Dans erreurs"
+
+
 def is_ignored_by_approval(row: dict[str, Any], approvals: set[tuple[str, str]]) -> bool:
     variant_id = product_id(row)
     return any((variant_id, error) in approvals for error in IGNORED_WHEN_APPROVED_ERRORS)
@@ -1288,9 +1310,12 @@ def api_gpt_batch_items(
         ).fetchone()[0]
     items = [dict(row) for row in rows]
     products_by_id = {product_id(row): row for row in load_products()}
+    approvals = load_approvals()
+    processed_brands = load_processed_brands()
     for item in items:
         row = products_by_id.get(item["Internal_Variant_ID"])
         item["Lightspeed_Admin_URL"] = lightspeed_admin_url(row or item)
+        item["Catalogue_State"] = batch_catalog_state(row, approvals, processed_brands)
     return {"total": total, "items": items}
 
 

@@ -670,7 +670,7 @@ function batchItemsTableHtml(items, countLabel, withApprove, withSelection = fal
   return `
     <div class="muted table-count">${escapeHtml(countLabel)}</div>
     <table>
-      <thead><tr>${selectionHeader}<th>Marque</th><th>Produit</th><th>SKU</th><th>Statut</th><th>Action</th></tr></thead>
+      <thead><tr>${selectionHeader}<th>Marque</th><th>Produit</th><th>SKU</th><th>État catalogue</th><th>Statut</th><th>Action</th></tr></thead>
       <tbody>
         ${items.map((item) => {
           const url = withApprove ? buildBatchAutofillLightspeedUrl(item) : "";
@@ -683,6 +683,7 @@ function batchItemsTableHtml(items, countLabel, withApprove, withSelection = fal
               <td>${escapeHtml(item.Brand)}</td>
               <td>${escapeHtml(item.Product_Title)}</td>
               <td>${escapeHtml(item.SKU)}</td>
+              <td><span class="status">${escapeHtml(item.Catalogue_State || "")}</span></td>
               <td><span class="status">${escapeHtml(item.status)}</span></td>
               <td>
                 ${withApprove && url
@@ -693,7 +694,7 @@ function batchItemsTableHtml(items, countLabel, withApprove, withSelection = fal
               </td>
             </tr>
           `;
-        }).join("") || `<tr><td colspan="${withSelection ? 6 : 5}" class="muted">Aucun produit.</td></tr>`}
+        }).join("") || `<tr><td colspan="${withSelection ? 7 : 6}" class="muted">Aucun produit.</td></tr>`}
       </tbody>
     </table>
   `;
