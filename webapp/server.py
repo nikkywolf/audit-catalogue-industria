@@ -326,18 +326,13 @@ def batch_catalog_state(
     if not row:
         return "Absent export"
     brand = clean(row.get("Brand"))
-    summary = summarize_product(row, approvals)
     if brand not in processed_brands:
         return "Marque ignorée"
     if is_ignored_by_approval(row, approvals):
         return "Ignoré"
-    if summary["Erreurs restantes"] <= 0:
-        return "Plus d'erreur"
     if is_masked_product(row):
         return "Masqué"
-    if not is_batch_correctable(row):
-        return "Non JSON"
-    return "Dans erreurs"
+    return "Dans catalogue"
 
 
 def is_ignored_by_approval(row: dict[str, Any], approvals: set[tuple[str, str]]) -> bool:
