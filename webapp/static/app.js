@@ -17,6 +17,7 @@ const state = {
   batchCompleted: [],
   batchCompletedSelectedIds: new Set(),
   selectedProductIds: new Set(),
+  productRequestId: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -143,11 +144,21 @@ function productQuery() {
 }
 
 async function loadProducts() {
-  const data = await api(`/api/products?${productQuery()}`);
-  state.productRows = data.items;
-  state.productTotal = data.total;
-  $("#productCount").textContent = `Produits affichés : ${data.total}`;
-  renderProducts();
+  const requestId = ++state.productRequestId;
+  $("#productCount").textContent = "Chargement des produits...";
+  $("#productsTable").innerHTML = '<div class="muted">Chargement...</div>';
+  try {
+    const data = await api(`/api/products?${productQuery()}`);
+    if (requestId !== state.productRequestId) return;
+    state.productRows = data.items;
+    state.productTotal = data.total;
+    $("#productCount").textContent = `Produits affichés : ${data.total}`;
+    renderProducts();
+  } catch (error) {
+    if (requestId !== state.productRequestId) return;
+    $("#productCount").textContent = "Erreur de chargement";
+    $("#productsTable").innerHTML = `<div class="error-box">${escapeHtml(error.message || String(error))}</div>`;
+  }
 }
 
 function updateProductBatchSelectionUi() {

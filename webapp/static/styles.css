@@ -297,6 +297,14 @@ th {
   color: var(--ok);
 }
 
+.error-box {
+  border: 1px solid #6f2f3c;
+  border-radius: 8px;
+  background: #25161b;
+  color: #ffd1d8;
+  padding: 12px;
+}
+
 .todo-form {
   display: grid;
   grid-template-columns: 1fr 160px 160px auto;
