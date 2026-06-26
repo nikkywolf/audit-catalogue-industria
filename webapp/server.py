@@ -1096,19 +1096,26 @@ def api_gpt_batch_queue(
             )
             created += int(result.rowcount or 0)
             if not result.rowcount and force:
-                conn.execute(
+                reset_result = conn.execute(
                     """
                     UPDATE gpt_batch_items
-                    SET force_submit = 1,
+                    SET status = 'pending',
+                        batch_id = '',
+                        custom_id = '',
+                        request_json = '',
+                        result_json = '',
+                        error = '',
+                        force_submit = 1,
                         updated_at = ?
                     WHERE Internal_Variant_ID = ?
-                      AND status = 'pending'
+                      AND status IN ('pending', 'submitted', 'error', 'completed', 'approved')
                     """,
                     (now, summary["Internal_Variant_ID"]),
                 )
+                created += int(reset_result.rowcount or 0)
             if result.rowcount and is_matrix_product(row, matrix_ids):
                 existing_internal_ids.add(internal_id)
-    return {"ok": True, "created": created}
+    return {"ok": True, "created": created, "queued": created}
 
 
 @app.post("/api/gpt-batches/queue-and-submit")
