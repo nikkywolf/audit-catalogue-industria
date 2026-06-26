@@ -127,12 +127,45 @@ def parse_result_json(record: dict[str, Any]) -> str:
     return json.dumps(json.loads(content), ensure_ascii=False, indent=2)
 
 
+def parse_request_product(record: dict[str, Any]) -> dict[str, Any]:
+    messages = ((record.get("body") or {}).get("messages") or [])
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except json.JSONDecodeError:
+            continue
+        product = payload.get("product")
+        if isinstance(product, dict):
+            return product
+    return {}
+
+
+def input_product_lookup(batch: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    input_file_id = batch.get("input_file_id") or ""
+    if not input_file_id:
+        return {}
+    content = curl_text(f"/v1/files/{input_file_id}/content")
+    lookup: dict[str, dict[str, Any]] = {}
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        variant_id = str(record.get("custom_id", ""))
+        product = parse_request_product(record)
+        if variant_id and product:
+            lookup[variant_id] = product
+    return lookup
+
+
 def restore_batch(conn: sqlite3.Connection, batch: dict[str, Any], products: dict[str, dict[str, Any]]) -> int:
     output_file_id = batch.get("output_file_id") or ""
     if not output_file_id:
         return 0
 
     content = curl_text(f"/v1/files/{output_file_id}/content")
+    input_products = input_product_lookup(batch)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     restored = 0
 
@@ -160,7 +193,7 @@ def restore_batch(conn: sqlite3.Connection, batch: dict[str, Any], products: dic
         variant_id = str(record.get("custom_id", ""))
         if not variant_id:
             continue
-        product = products.get(variant_id, {})
+        product = products.get(variant_id) or input_products.get(variant_id, {})
         try:
             result_json = parse_result_json(record)
             error = ""
@@ -177,6 +210,22 @@ def restore_batch(conn: sqlite3.Connection, batch: dict[str, Any], products: dic
              batch_id, custom_id, result_json, error, force_submit, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(Internal_Variant_ID) DO UPDATE SET
+                Internal_ID = CASE
+                    WHEN COALESCE(gpt_batch_items.Internal_ID, '') = '' THEN excluded.Internal_ID
+                    ELSE gpt_batch_items.Internal_ID
+                END,
+                Brand = CASE
+                    WHEN COALESCE(gpt_batch_items.Brand, '') = '' THEN excluded.Brand
+                    ELSE gpt_batch_items.Brand
+                END,
+                Product_Title = CASE
+                    WHEN COALESCE(gpt_batch_items.Product_Title, '') = '' THEN excluded.Product_Title
+                    ELSE gpt_batch_items.Product_Title
+                END,
+                SKU = CASE
+                    WHEN COALESCE(gpt_batch_items.SKU, '') = '' THEN excluded.SKU
+                    ELSE gpt_batch_items.SKU
+                END,
                 status = excluded.status,
                 batch_id = excluded.batch_id,
                 custom_id = excluded.custom_id,
