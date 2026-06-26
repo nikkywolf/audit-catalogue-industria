@@ -1262,7 +1262,19 @@ def api_gpt_batch_items(
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT *
+            SELECT
+                Internal_Variant_ID,
+                Internal_ID,
+                Brand,
+                Product_Title,
+                SKU,
+                status,
+                batch_id,
+                custom_id,
+                error,
+                force_submit,
+                created_at,
+                updated_at
             FROM gpt_batch_items
             WHERE {where}
             ORDER BY updated_at DESC
@@ -1275,8 +1287,9 @@ def api_gpt_batch_items(
             params[:-1],
         ).fetchone()[0]
     items = [dict(row) for row in rows]
+    products_by_id = {product_id(row): row for row in load_products()}
     for item in items:
-        row = find_product(item["Internal_Variant_ID"])
+        row = products_by_id.get(item["Internal_Variant_ID"])
         item["Lightspeed_Admin_URL"] = lightspeed_admin_url(row or item)
     return {"total": total, "items": items}
 

@@ -18,6 +18,7 @@ const state = {
   batchCompletedSelectedIds: new Set(),
   selectedProductIds: new Set(),
   productRequestId: 0,
+  loadedPages: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -55,6 +56,23 @@ function setPage(pageId) {
   document.querySelectorAll(".nav").forEach((button) => button.classList.remove("active"));
   $(`#${pageId}`).classList.add("active");
   document.querySelector(`[data-page="${pageId}"]`).classList.add("active");
+  loadPageData(pageId);
+}
+
+async function loadPageData(pageId, force = false) {
+  if (!force && state.loadedPages.has(pageId)) return;
+  state.loadedPages.add(pageId);
+  if (pageId === "overview") {
+    await loadIgnored();
+  } else if (pageId === "errors") {
+    await loadProducts();
+  } else if (pageId === "todos") {
+    await loadTodos();
+  } else if (pageId === "admin") {
+    await loadBrandsAdmin();
+  } else if (pageId === "gptBatch" && isAdmin()) {
+    await loadGptBatchPage();
+  }
 }
 
 function metric(label, value) {
@@ -695,13 +713,7 @@ async function setup() {
   });
 
   await loadBootstrap();
-  await loadProducts();
-  await loadIgnored();
-  await loadTodos();
-  await loadBrandsAdmin();
-  if (isAdmin()) {
-    await loadGptBatchPage();
-  }
+  await loadPageData("overview");
 
   const reloadProducts = debounce(() => {
     state.openProductId = null;
