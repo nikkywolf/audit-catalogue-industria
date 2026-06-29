@@ -324,6 +324,12 @@ function renderImages() {
   document.querySelectorAll("[data-image-upload]").forEach((input) => {
     input.addEventListener("change", () => uploadProductImages(input));
   });
+  document.querySelectorAll("[data-image-analyze]").forEach((button) => {
+    button.addEventListener("click", () => analyzeProductImages(button));
+  });
+  document.querySelectorAll("[data-image-process]").forEach((button) => {
+    button.addEventListener("click", () => processProductImages(button));
+  });
 }
 
 function imageRowHtml(row) {
@@ -343,6 +349,8 @@ function imageRowHtml(row) {
       <td class="row-actions">
         ${row.Lightspeed_Admin_URL ? `<a class="button-link" href="${escapeHtml(row.Lightspeed_Admin_URL)}" target="_blank" rel="noopener noreferrer">Lightspeed</a>` : ""}
         <label class="button-link file-button">Upload<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" data-image-upload="${variantId}" /></label>
+        <button data-image-analyze="${escapeHtml(row.Product_ID)}">Analyser GPT</button>
+        <button data-image-process="${escapeHtml(row.Product_ID)}">Traiter</button>
         <a class="button-link" href="${escapeHtml(productZip)}" target="_blank" rel="noopener noreferrer">ZIP produit</a>
         <a class="button-link" href="${escapeHtml(brandZip)}" target="_blank" rel="noopener noreferrer">ZIP marque</a>
       </td>
@@ -368,6 +376,42 @@ async function uploadProductImages(input) {
   input.value = "";
   await loadImageMetrics();
   await loadImages();
+}
+
+async function analyzeProductImages(button) {
+  const productId = button.dataset.imageAnalyze;
+  const ok = window.confirm("Analyser les images de ce produit avec GPT Vision? Cette action utilise l'API OpenAI.");
+  if (!ok) return;
+  button.disabled = true;
+  button.textContent = "Analyse...";
+  try {
+    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/analyze`, { method: "POST" });
+    window.alert(`${result.analyzed || 0} image(s) analysée(s).`);
+    await loadImageMetrics();
+    await loadImages();
+  } catch (error) {
+    window.alert(error.message || String(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Analyser GPT";
+  }
+}
+
+async function processProductImages(button) {
+  const productId = button.dataset.imageProcess;
+  button.disabled = true;
+  button.textContent = "Traitement...";
+  try {
+    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/process`, { method: "POST" });
+    window.alert(`${result.processed || 0} image(s) traitée(s).`);
+    await loadImageMetrics();
+    await loadImages();
+  } catch (error) {
+    window.alert(error.message || String(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Traiter";
+  }
 }
 
 async function toggleProduct(id) {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import base64
+from io import BytesIO
 import mimetypes
 import os
 import re
@@ -1314,6 +1316,166 @@ def save_upload_bytes(target: Path, data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def find_product_by_image_product_id(product_key: str) -> Optional[dict[str, Any]]:
+    for row in load_products():
+        if product_image_product_id(row) == product_key:
+            return row
+    return None
+
+
+def image_data_url(path: Path, mime_type: str = "") -> str:
+    data = path.read_bytes()
+    mime = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def analyze_image_with_gpt(row: dict[str, Any], image: dict[str, Any]) -> dict[str, Any]:
+    source_path = Path(clean(image.get("original_path")))
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Image originale introuvable")
+    prompt = {
+        "task": "Analyse cette image produit e-commerce Industria et retourne uniquement du JSON.",
+        "product": {
+            "brand": clean(row.get("Brand")),
+            "title": product_display_title(row),
+            "product_id": product_image_product_id(row),
+            "sku": clean(row.get("SKU")),
+        },
+        "expected_schema": {
+            "image_role": "principal|lifestyle|texture|dos|ingredients|infographie|packaging|avant_apres|application|routine|resultat|gamme|autre|validation_requise",
+            "confidence": "0-100",
+            "plp_suitable": "boolean",
+            "single_product": "boolean",
+            "white_background": "boolean",
+            "complete_product": "boolean",
+            "official_looking": "boolean",
+            "blurry": "boolean",
+            "label_readable": "boolean",
+            "contains_person": "boolean",
+            "contains_decor": "boolean",
+            "multiple_products": "boolean",
+            "right_product": "boolean",
+            "reasons": "array of strings",
+            "warnings": "array of strings",
+        },
+        "rules": [
+            "Ne modifie jamais l'image.",
+            "Ne génère pas de nouveau visuel.",
+            "Recommande principal seulement si l'image convient comme photo PLP.",
+            "Si incertain, utilise validation_requise.",
+        ],
+    }
+    payload = {
+        "model": os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
+                    {"type": "image_url", "image_url": {"url": image_data_url(source_path)}},
+                ],
+            }
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+    }
+    data = openai_request("/v1/chat/completions", payload)
+    content = data["choices"][0]["message"]["content"]
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Analyse GPT Vision invalide: {exc}")
+
+
+def image_role_suffix(role: str) -> str:
+    mapping = {
+        "principal": "principal",
+        "lifestyle": "lifestyle",
+        "texture": "texture",
+        "dos": "dos",
+        "ingredients": "ingredients",
+        "infographie": "infographie",
+        "packaging": "packaging",
+        "avant_apres": "avant-apres",
+        "application": "application",
+        "routine": "routine",
+        "resultat": "resultat",
+        "gamme": "gamme",
+    }
+    return mapping.get(clean(role), "validation")
+
+
+def processed_image_filename(row: dict[str, Any], role: str, extension: str = ".jpg", index: int = 1) -> str:
+    base = seo_slug(f"{clean(row.get('Brand'))} {product_display_title(row)}", product_image_product_id(row))
+    suffix = image_role_suffix(role)
+    duplicate_suffix = "" if index <= 1 else f"-{index}"
+    return f"{base}-{suffix}{duplicate_suffix}{extension}"
+
+
+def save_jpeg_under_target(image, path: Path, target_kb: int = 100, min_quality: int = 62) -> tuple[int, float]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    best_data = b""
+    best_quality = 88
+    for quality in range(88, min_quality - 1, -4):
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+        data = buffer.getvalue()
+        best_data = data
+        best_quality = quality
+        if len(data) <= target_kb * 1024:
+            break
+    path.write_bytes(best_data)
+    return best_quality, round(len(best_data) / 1024, 2)
+
+
+def process_image_file(row: dict[str, Any], image: dict[str, Any], index: int = 1) -> dict[str, Any]:
+    try:
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Pillow n'est pas disponible: {exc}")
+
+    source_path = Path(clean(image.get("original_path")))
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Image originale introuvable")
+    role = clean(image.get("image_role")) or "validation_requise"
+    product_key = product_image_product_id(row)
+    filename = processed_image_filename(row, role, index=index)
+    target_path = IMAGE_DATA_DIR / "processed" / product_key / filename
+
+    with Image.open(source_path) as raw:
+        raw = ImageOps.exif_transpose(raw).convert("RGBA")
+        if role == "principal" or image.get("is_selected_primary"):
+            canvas = Image.new("RGB", (1080, 1080), "#FFFFFF")
+            raw.thumbnail((920, 920), Image.LANCZOS)
+            composed = Image.new("RGBA", raw.size, "#FFFFFF")
+            composed.alpha_composite(raw)
+            rgb = composed.convert("RGB")
+            x = (1080 - rgb.width) // 2
+            y = (1080 - rgb.height) // 2
+            canvas.paste(rgb, (x, y))
+            quality, size_kb = save_jpeg_under_target(canvas, target_path, target_kb=100)
+            width, height = canvas.size
+        else:
+            raw.thumbnail((1080, 1080), Image.LANCZOS)
+            canvas = Image.new("RGB", raw.size, "#FFFFFF")
+            canvas.paste(raw.convert("RGB"), (0, 0))
+            quality, size_kb = save_jpeg_under_target(canvas, target_path, target_kb=280, min_quality=68)
+            width, height = canvas.size
+
+    return {
+        "processed_filename": filename,
+        "processed_path": str(target_path),
+        "width": width,
+        "height": height,
+        "size_kb": size_kb,
+        "format": "jpg",
+        "quality": quality,
+        "role": role,
+        "status": "processed",
+        "warnings": [] if size_kb <= (100 if role == "principal" else 280) else ["poids trop élevé"],
+    }
+
+
 @app.post("/api/images/products/{variant_id}/upload")
 async def api_image_upload(
     variant_id: str,
@@ -1364,6 +1526,152 @@ async def api_image_upload(
             )
             saved += 1
     return {"ok": True, "saved": saved}
+
+
+@app.post("/api/images/products/{product_key}/analyze")
+def api_image_analyze_product(
+    product_key: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_image_tables()
+    openai_api_key()
+    row = find_product_by_image_product_id(product_key)
+    if not row:
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+    now = now_text()
+    analyzed = 0
+    with connect() as conn:
+        images = [dict(item) for item in conn.execute(
+            """
+            SELECT *
+            FROM product_images
+            WHERE product_id = ?
+              AND original_path != ''
+            """,
+            (product_key,),
+        ).fetchall()]
+        best_primary_id = ""
+        best_primary_confidence = 0.0
+        for image in images:
+            analysis = analyze_image_with_gpt(row, image)
+            role = clean(analysis.get("image_role")) or "validation_requise"
+            try:
+                confidence = float(str(analysis.get("confidence") or 0).replace("%", "").strip())
+            except ValueError:
+                confidence = 0.0
+            is_primary = 1 if role == "principal" and confidence >= 75 and analysis.get("plp_suitable") else 0
+            if is_primary and confidence > best_primary_confidence:
+                best_primary_id = image["id"]
+                best_primary_confidence = confidence
+            status = "validation_requise" if role in {"validation_requise", "autre"} or confidence < 65 else "analyse_ok"
+            conn.execute(
+                """
+                UPDATE product_images
+                SET image_role = ?,
+                    is_primary_candidate = ?,
+                    is_selected_primary = 0,
+                    status = ?,
+                    quality_report_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (role, is_primary, status, json.dumps(analysis, ensure_ascii=False), now, image["id"]),
+            )
+            analyzed += 1
+        if best_primary_id:
+            conn.execute(
+                "UPDATE product_images SET is_selected_primary = 1 WHERE id = ?",
+                (best_primary_id,),
+            )
+    return {"ok": True, "analyzed": analyzed}
+
+
+@app.post("/api/images/products/{product_key}/process")
+def api_image_process_product(
+    product_key: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_image_tables()
+    row = find_product_by_image_product_id(product_key)
+    if not row:
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+    now = now_text()
+    processed = 0
+    with connect() as conn:
+        images = [dict(item) for item in conn.execute(
+            """
+            SELECT *
+            FROM product_images
+            WHERE product_id = ?
+              AND original_path != ''
+            """,
+            (product_key,),
+        ).fetchall()]
+        role_counts: dict[str, int] = {}
+        for image in images:
+            role = clean(image.get("image_role")) or "validation_requise"
+            role_counts[role] = role_counts.get(role, 0) + 1
+            report = process_image_file(row, image, index=role_counts[role])
+            merged_report = {}
+            if clean(image.get("quality_report_json")):
+                try:
+                    merged_report = json.loads(image["quality_report_json"])
+                except json.JSONDecodeError:
+                    merged_report = {}
+            merged_report["processing"] = report
+            conn.execute(
+                """
+                UPDATE product_images
+                SET processed_filename = ?,
+                    processed_path = ?,
+                    status = ?,
+                    quality_report_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    report["processed_filename"],
+                    report["processed_path"],
+                    "processed",
+                    json.dumps(merged_report, ensure_ascii=False),
+                    now,
+                    image["id"],
+                ),
+            )
+            processed += 1
+    return {"ok": True, "processed": processed}
+
+
+@app.post("/api/images/{image_id}/primary")
+def api_image_select_primary(
+    image_id: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_image_tables()
+    now = now_text()
+    with connect() as conn:
+        image = conn.execute("SELECT * FROM product_images WHERE id = ?", (image_id,)).fetchone()
+        if not image:
+            raise HTTPException(status_code=404, detail="Image introuvable")
+        conn.execute(
+            "UPDATE product_images SET is_selected_primary = 0 WHERE product_id = ?",
+            (image["product_id"],),
+        )
+        conn.execute(
+            """
+            UPDATE product_images
+            SET is_selected_primary = 1,
+                image_role = 'principal',
+                status = 'validation_requise',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, image_id),
+        )
+    return {"ok": True}
 
 
 def image_rows_for_export(scope: str, product_id_value: str = "", variant_id: str = "", brand: str = "", gamme: str = "") -> list[dict[str, Any]]:
