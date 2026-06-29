@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
+import unicodedata
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 import uuid
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +26,8 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 DB_PATH = PROJECT_DIR / "industria_catalogue.db"
+IMAGE_DATA_DIR = PROJECT_DIR / "data" / "images"
+IMAGE_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 IGNORED_WHEN_APPROVED_ERRORS = {
     "Produit invisible — vérifier si volontaire",
@@ -172,6 +179,77 @@ def ensure_product_source_table() -> None:
         )
 
 
+def ensure_image_tables() -> None:
+    IMAGE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS image_sources (
+                id TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                source_type TEXT DEFAULT '',
+                priority INTEGER DEFAULT 100,
+                is_allowed INTEGER NOT NULL DEFAULT 1,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS image_search_runs (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                query_json TEXT DEFAULT '',
+                started_at TEXT NOT NULL,
+                completed_at TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                candidates_found INTEGER NOT NULL DEFAULT 0,
+                candidates_downloaded INTEGER NOT NULL DEFAULT 0,
+                errors_json TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS product_image_candidates (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                variant_id TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
+                source_domain TEXT DEFAULT '',
+                source_type TEXT DEFAULT 'manual_upload',
+                original_filename TEXT DEFAULT '',
+                original_path TEXT DEFAULT '',
+                file_hash TEXT DEFAULT '',
+                perceptual_hash TEXT DEFAULT '',
+                width INTEGER DEFAULT 0,
+                height INTEGER DEFAULT 0,
+                file_size_kb REAL DEFAULT 0,
+                mime_type TEXT DEFAULT '',
+                http_status INTEGER DEFAULT 0,
+                download_status TEXT NOT NULL DEFAULT 'saved',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS product_images (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                variant_id TEXT DEFAULT '',
+                candidate_id TEXT DEFAULT '',
+                original_filename TEXT DEFAULT '',
+                original_path TEXT DEFAULT '',
+                processed_filename TEXT DEFAULT '',
+                processed_path TEXT DEFAULT '',
+                image_role TEXT DEFAULT 'validation_requise',
+                is_primary_candidate INTEGER NOT NULL DEFAULT 0,
+                is_selected_primary INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'validation_requise',
+                quality_report_json TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
 def current_user(x_remote_user: Optional[str] = Header(default=None)) -> dict[str, str]:
     username = (x_remote_user or "vero").lower()
     if username not in USERS:
@@ -193,6 +271,66 @@ def clean(value: Any) -> str:
     if text in {"", "None", "nan"}:
         return ""
     return text
+
+
+def safe_folder_segment(value: Any, fallback: str) -> str:
+    text = clean(value) or fallback
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = text.replace("/", " ").replace("\\", " ")
+    text = re.sub(r"[<>:\"|?*\x00-\x1f]", " ", text)
+    text = re.sub(r"[^A-Za-z0-9._() -]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .-_")
+    return text or fallback
+
+
+def seo_slug(value: Any, fallback: str = "image") -> str:
+    text = clean(value) or fallback
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text or fallback
+
+
+def product_display_title(row: dict[str, Any]) -> str:
+    return clean(row.get("FC_Title_Short")) or clean(row.get("FR_Title_Short")) or clean(row.get("US_Title_Short")) or product_id(row)
+
+
+def product_image_product_id(row: dict[str, Any]) -> str:
+    return product_internal_id(row) or product_id(row).replace("!ID:", "") or product_id(row)
+
+
+def product_group_name(row: dict[str, Any]) -> str:
+    title = product_display_title(row)
+    brand = clean(row.get("Brand"))
+    if brand and title.lower().startswith(brand.lower()):
+        title = title[len(brand):].lstrip(" -|")
+    if "|" in title:
+        group = title.split("|", 1)[0]
+    elif " - " in title:
+        group = title.split(" - ", 1)[0]
+    else:
+        group = ""
+    return clean(group) or "sans-gamme"
+
+
+def product_folder_name(row: dict[str, Any]) -> str:
+    title = product_display_title(row)
+    brand = clean(row.get("Brand"))
+    if brand and title.lower().startswith(brand.lower()):
+        title = title[len(brand):].lstrip(" -|")
+    if "|" in title:
+        title = title.split("|", 1)[1]
+    title = clean(title) or product_image_product_id(row)
+    return title
+
+
+def image_zip_folder_parts(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        safe_folder_segment(clean(row.get("Brand")), "sans-marque"),
+        safe_folder_segment(product_group_name(row), "sans-gamme"),
+        safe_folder_segment(product_folder_name(row), product_image_product_id(row)),
+    )
 
 
 def split_error_list(value: Any) -> list[str]:
@@ -359,6 +497,61 @@ def summarize_product(row: dict[str, Any], approvals: set[tuple[str, str]]) -> d
         "Lightspeed_Admin_URL": lightspeed_admin_url(row),
         "Erreurs restantes": remaining_count,
         "Erreurs approuvées": approved_count,
+    }
+
+
+def image_counts_by_product() -> dict[str, dict[str, int]]:
+    ensure_image_tables()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                product_id,
+                COUNT(*) AS total_images,
+                SUM(CASE WHEN is_selected_primary = 1 THEN 1 ELSE 0 END) AS primary_images,
+                SUM(CASE WHEN status = 'validation_requise' THEN 1 ELSE 0 END) AS validation_required
+            FROM product_images
+            GROUP BY product_id
+            """
+        ).fetchall()
+    return {
+        row["product_id"]: {
+            "total_images": int(row["total_images"] or 0),
+            "primary_images": int(row["primary_images"] or 0),
+            "validation_required": int(row["validation_required"] or 0),
+        }
+        for row in rows
+    }
+
+
+def product_image_status(row: dict[str, Any], counts: dict[str, int], processed_brands: set[str]) -> str:
+    if clean(row.get("Brand")) not in processed_brands:
+        return "Ignoré par marque"
+    if counts.get("total_images", 0) <= 0:
+        return "Manquante"
+    if counts.get("validation_required", 0) > 0:
+        return "Validation requise"
+    if counts.get("primary_images", 0) <= 0:
+        return "Photo principale manquante"
+    return "Conforme"
+
+
+def summarize_image_product(row: dict[str, Any], counts_by_product: dict[str, dict[str, int]], processed_brands: set[str]) -> dict[str, Any]:
+    product_key = product_image_product_id(row)
+    counts = counts_by_product.get(product_key, {"total_images": 0, "primary_images": 0, "validation_required": 0})
+    return {
+        "Internal_Variant_ID": product_id(row),
+        "Internal_ID": product_internal_id(row),
+        "Product_ID": product_key,
+        "Brand": clean(row.get("Brand")),
+        "Gamme": product_group_name(row),
+        "Produit": product_display_title(row),
+        "SKU": clean(row.get("SKU")),
+        "Statut image": product_image_status(row, counts, processed_brands),
+        "Images": counts.get("total_images", 0),
+        "Principale": counts.get("primary_images", 0),
+        "Validation": counts.get("validation_required", 0),
+        "Lightspeed_Admin_URL": lightspeed_admin_url(row),
     }
 
 
@@ -1043,6 +1236,217 @@ def api_restore_brand(payload: BrandPayload):
     with connect() as conn:
         conn.execute("INSERT OR IGNORE INTO brand_settings (Brand) VALUES (?)", (brand,))
     return {"ok": True}
+
+
+@app.get("/api/images/products")
+def api_image_products(
+    search: str = "",
+    brand: str = "",
+    status: str = "",
+    limit: int = 100,
+    offset: int = 0,
+):
+    ensure_image_tables()
+    products = load_products()
+    processed_brands = load_processed_brands()
+    counts_by_product = image_counts_by_product()
+
+    rows = []
+    query = search.lower().strip()
+    for row in products:
+        if clean(row.get("Brand")) not in processed_brands:
+            continue
+        summary = summarize_image_product(row, counts_by_product, processed_brands)
+        if brand and summary["Brand"] != brand:
+            continue
+        if status and summary["Statut image"] != status:
+            continue
+        if query:
+            haystack = " ".join(
+                [
+                    summary["Brand"],
+                    summary["Gamme"],
+                    summary["Produit"],
+                    summary["Product_ID"],
+                    summary["Internal_Variant_ID"],
+                    summary["SKU"],
+                ]
+            ).lower()
+            if query not in haystack:
+                continue
+        rows.append(summary)
+
+    return {"total": len(rows), "items": rows[offset: offset + min(limit, 500)]}
+
+
+@app.get("/api/images/metrics")
+def api_image_metrics():
+    ensure_image_tables()
+    products = load_products()
+    processed_brands = load_processed_brands()
+    counts_by_product = image_counts_by_product()
+    summaries = [summarize_image_product(row, counts_by_product, processed_brands) for row in products]
+    included = [item for item in summaries if item["Statut image"] != "Ignoré par marque"]
+    return {
+        "total_analysable": len(included),
+        "sans_image": sum(1 for item in included if item["Statut image"] == "Manquante"),
+        "sans_principale": sum(1 for item in included if item["Statut image"] == "Photo principale manquante"),
+        "validation_requise": sum(1 for item in included if item["Statut image"] == "Validation requise"),
+        "conformes": sum(1 for item in included if item["Statut image"] == "Conforme"),
+        "marques_ignorees_exclues": len(summaries) - len(included),
+    }
+
+
+def image_file_extension(upload: UploadFile) -> str:
+    mime = clean(upload.content_type).lower()
+    if mime not in IMAGE_UPLOAD_MIME_TYPES:
+        raise HTTPException(status_code=400, detail=f"Format image non supporté: {upload.content_type or upload.filename}")
+    extension = Path(upload.filename or "").suffix.lower()
+    if extension in {".jpg", ".jpeg", ".png", ".webp"}:
+        return ".jpg" if extension == ".jpeg" else extension
+    guessed = mimetypes.guess_extension(mime) or ".jpg"
+    return ".jpg" if guessed == ".jpe" else guessed
+
+
+def save_upload_bytes(target: Path, data: bytes) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+@app.post("/api/images/products/{variant_id}/upload")
+async def api_image_upload(
+    variant_id: str,
+    files: list[UploadFile] = File(...),
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_image_tables()
+    row = find_product(variant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+    product_key = product_image_product_id(row)
+    now = now_text()
+    saved = 0
+    with connect() as conn:
+        for upload in files:
+            extension = image_file_extension(upload)
+            data = await upload.read()
+            if not data:
+                continue
+            image_id = str(uuid.uuid4())
+            base_name = seo_slug(f"{clean(row.get('Brand'))} {product_display_title(row)}", product_key)
+            filename = f"{base_name}-{image_id[:8]}{extension}"
+            original_path = IMAGE_DATA_DIR / "originals" / product_key / filename
+            candidate_path = IMAGE_DATA_DIR / "candidates" / product_key / filename
+            file_hash = save_upload_bytes(original_path, data)
+            candidate_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original_path, candidate_path)
+            size_kb = round(len(data) / 1024, 2)
+            candidate_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO product_image_candidates
+                (id, product_id, variant_id, source_type, original_filename, original_path,
+                 file_hash, file_size_kb, mime_type, download_status, created_at)
+                VALUES (?, ?, ?, 'manual_upload', ?, ?, ?, ?, ?, 'saved', ?)
+                """,
+                (candidate_id, product_key, variant_id, upload.filename or filename, str(candidate_path), file_hash, size_kb, upload.content_type or "", now),
+            )
+            conn.execute(
+                """
+                INSERT INTO product_images
+                (id, product_id, variant_id, candidate_id, original_filename, original_path,
+                 image_role, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'validation_requise', 'validation_requise', ?, ?)
+                """,
+                (image_id, product_key, variant_id, candidate_id, filename, str(original_path), now, now),
+            )
+            saved += 1
+    return {"ok": True, "saved": saved}
+
+
+def image_rows_for_export(scope: str, product_id_value: str = "", variant_id: str = "", brand: str = "", gamme: str = "") -> list[dict[str, Any]]:
+    ensure_image_tables()
+    products = load_products()
+    products_by_product_id = {product_image_product_id(row): row for row in products}
+    products_by_variant_id = {product_id(row): row for row in products}
+    where = []
+    params: list[Any] = []
+    if scope == "product":
+        if variant_id:
+            where.append("variant_id = ?")
+            params.append(variant_id)
+        elif product_id_value:
+            where.append("product_id = ?")
+            params.append(product_id_value)
+        else:
+            raise HTTPException(status_code=400, detail="Produit manquant")
+    elif scope == "brand":
+        if not brand:
+            raise HTTPException(status_code=400, detail="Marque manquante")
+    elif scope == "gamme":
+        if not brand or not gamme:
+            raise HTTPException(status_code=400, detail="Marque et gamme requises")
+    elif scope != "all":
+        raise HTTPException(status_code=400, detail="Scope ZIP invalide")
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    with connect() as conn:
+        image_rows = [dict(row) for row in conn.execute(f"SELECT * FROM product_images {where_sql}", params).fetchall()]
+
+    export_rows = []
+    for image in image_rows:
+        row = products_by_variant_id.get(image["variant_id"]) or products_by_product_id.get(image["product_id"])
+        if not row:
+            continue
+        if scope == "brand" and clean(row.get("Brand")) != brand:
+            continue
+        if scope == "gamme" and (clean(row.get("Brand")) != brand or product_group_name(row) != gamme):
+            continue
+        export_rows.append({"image": image, "product": row})
+    return export_rows
+
+
+def create_images_zip(scope: str, product_id_value: str = "", variant_id: str = "", brand: str = "", gamme: str = "") -> Path:
+    rows = image_rows_for_export(scope, product_id_value=product_id_value, variant_id=variant_id, brand=brand, gamme=gamme)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Aucune image à exporter")
+    tmp_dir = Path("/tmp") / "industria-image-zips"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = tmp_dir / f"industria-images-{scope}-{uuid.uuid4().hex[:10]}.zip"
+    used_product_paths: dict[tuple[str, str, str], str] = {}
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for item in rows:
+            image = item["image"]
+            row = item["product"]
+            source_path = Path(clean(image.get("processed_path")) or clean(image.get("original_path")))
+            if not source_path.exists():
+                continue
+            brand_part, group_part, product_part = image_zip_folder_parts(row)
+            key = (brand_part, group_part, product_part)
+            existing_product_id = used_product_paths.get(key)
+            current_product_id = product_image_product_id(row)
+            if existing_product_id and existing_product_id != current_product_id:
+                product_part = safe_folder_segment(f"{product_part} {current_product_id}", current_product_id)
+            used_product_paths[key] = current_product_id
+            filename = clean(image.get("processed_filename")) or source_path.name
+            archive.write(source_path, f"{brand_part}/{group_part}/{product_part}/{filename}")
+    return zip_path
+
+
+@app.get("/api/images/export.zip")
+def api_images_export_zip(
+    scope: str = "product",
+    product_id: str = "",
+    variant_id: str = "",
+    brand: str = "",
+    gamme: str = "",
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    zip_path = create_images_zip(scope, product_id_value=product_id, variant_id=variant_id, brand=brand, gamme=gamme)
+    return FileResponse(zip_path, filename=zip_path.name, media_type="application/zip")
 
 
 @app.get("/api/gpt-batches/candidates")

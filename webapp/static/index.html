@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Industria Audit</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260626-0840" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260629-1015" />
   </head>
   <body>
     <aside class="sidebar">
@@ -14,6 +14,7 @@
       <nav>
         <button class="nav active" data-page="overview">Overview</button>
         <button class="nav" data-page="errors">Erreurs</button>
+        <button class="nav admin-only" data-page="images">Images</button>
         <button class="nav admin-only" data-page="gptBatch">Batch GPT</button>
         <button class="nav" data-page="todos">To-Do List</button>
         <button class="nav" data-page="admin">Admin</button>
@@ -127,6 +128,34 @@
         </section>
       </section>
 
+      <section id="images" class="page">
+        <div class="page-title">
+          <h2>Images</h2>
+        </div>
+        <div id="imageMetrics" class="metrics"></div>
+        <section class="panel">
+          <div class="filters">
+            <input id="imageSearch" type="search" placeholder="Recherche produit, marque, ID, SKU" />
+            <select id="imageBrandFilter"></select>
+            <select id="imageStatusFilter">
+              <option value="">Tous les statuts</option>
+              <option value="Manquante">Sans image</option>
+              <option value="Photo principale manquante">Sans photo principale</option>
+              <option value="Validation requise">Validation requise</option>
+              <option value="Conforme">Conforme</option>
+            </select>
+            <select id="imageLimitFilter">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+            </select>
+            <a id="downloadAllImagesZip" class="button-link" href="/api/images/export.zip?scope=all" target="_blank" rel="noopener noreferrer">ZIP global</a>
+          </div>
+          <div id="imageCount" class="muted"></div>
+          <div id="imageProductsTable" class="table-wrap products"></div>
+        </section>
+      </section>
+
       <section id="todos" class="page">
         <div class="page-title">
           <h2>To-Do List</h2>
@@ -166,6 +195,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260626-0945"></script>
+    <script src="/static/app.js?v=20260629-1015"></script>
   </body>
 </html>

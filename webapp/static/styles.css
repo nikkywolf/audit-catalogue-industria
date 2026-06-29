@@ -139,6 +139,14 @@ button:hover {
   border-color: var(--accent);
 }
 
+.file-button {
+  cursor: pointer;
+}
+
+.file-button input {
+  display: none;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
