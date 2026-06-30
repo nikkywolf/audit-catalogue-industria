@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Industria Audit</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260629-1045" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260630-0935" />
   </head>
   <body>
     <aside class="sidebar">
@@ -15,7 +15,7 @@
         <button class="nav active" data-page="overview">Overview</button>
         <button class="nav" data-page="errors">Erreurs</button>
         <button class="nav admin-only" data-page="images">Images</button>
-        <button class="nav admin-only" data-page="gptBatch">Batch GPT</button>
+        <button class="nav" data-page="gptBatch">Batch GPT</button>
         <button class="nav" data-page="todos">To-Do List</button>
         <button class="nav" data-page="admin">Admin</button>
       </nav>
@@ -63,8 +63,8 @@
               <option value="100" selected>100</option>
               <option value="200">200</option>
             </select>
-            <button id="sendSelectedProductsBatch" class="admin-only" disabled>Envoyer en batch GPT</button>
-            <span id="selectedProductsCount" class="muted admin-only"></span>
+            <button id="sendSelectedProductsBatch" disabled>Envoyer en batch GPT</button>
+            <span id="selectedProductsCount" class="muted"></span>
           </div>
           <div id="productCount" class="muted"></div>
           <div id="productsTable" class="table-wrap products"></div>
@@ -195,6 +195,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260629-1045"></script>
+    <script src="/static/app.js?v=20260630-0935"></script>
   </body>
 </html>

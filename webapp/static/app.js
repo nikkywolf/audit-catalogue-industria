@@ -75,7 +75,7 @@ async function loadPageData(pageId, force = false) {
     await loadBrandsAdmin();
   } else if (pageId === "images" && isAdmin()) {
     await loadImagesPage();
-  } else if (pageId === "gptBatch" && isAdmin()) {
+  } else if (pageId === "gptBatch" && canUseGpt()) {
     await loadGptBatchPage();
   }
 }
@@ -129,11 +129,15 @@ function isAdmin() {
   return state.me && state.me.role === "admin";
 }
 
+function canUseGpt() {
+  return Boolean(state.me);
+}
+
 function applyRoleVisibility() {
   document.querySelectorAll(".admin-only").forEach((element) => {
     element.style.display = isAdmin() ? "" : "none";
   });
-  if (!isAdmin() && (document.querySelector("#gptBatch").classList.contains("active") || document.querySelector("#images").classList.contains("active"))) {
+  if (!isAdmin() && document.querySelector("#images").classList.contains("active")) {
     setPage("overview");
   }
 }
@@ -200,13 +204,13 @@ function updateProductBatchSelectionUi() {
 
 function renderProducts() {
   const rows = state.productRows;
-  const selectionHeader = isAdmin() ? '<th><input type="checkbox" data-select-visible-products /></th>' : "";
+  const selectionHeader = canUseGpt() ? '<th><input type="checkbox" data-select-visible-products /></th>' : "";
   $("#productsTable").innerHTML = `
     <table>
       <thead>
         <tr>
           ${selectionHeader}<th></th><th>Marque</th><th>Produit</th><th>SKU</th><th>UPC</th>
-          <th class="num">Score</th><th>Priorité</th><th class="num">Rest.</th><th class="num">Appr.</th><th class="admin-only">Infos produit</th><th class="admin-only">GPT</th>
+          <th class="num">Score</th><th>Priorité</th><th class="num">Rest.</th><th class="num">Appr.</th><th>Infos produit</th><th>GPT</th>
         </tr>
       </thead>
       <tbody>
@@ -244,12 +248,12 @@ function productRowHtml(row) {
   const productCell = row.Lightspeed_Admin_URL
     ? `<a class="product-link" href="${escapeHtml(row.Lightspeed_Admin_URL)}" target="_blank" rel="noopener noreferrer">${productName}</a>`
     : productName;
-  const gptButton = isAdmin() && buildAutofillLightspeedUrl(row)
+  const gptButton = canUseGpt() && buildAutofillLightspeedUrl(row)
     ? `<a class="button-link" href="${escapeHtml(buildAutofillLightspeedUrl(row))}" target="_blank" rel="noopener noreferrer">Remplir avec GPT</a>`
     : "";
   return `
     <tr>
-      ${isAdmin() ? `<td><input type="checkbox" data-select-product="${escapeHtml(id)}" ${state.selectedProductIds.has(id) ? "checked" : ""} /></td>` : ""}
+      ${canUseGpt() ? `<td><input type="checkbox" data-select-product="${escapeHtml(id)}" ${state.selectedProductIds.has(id) ? "checked" : ""} /></td>` : ""}
       <td><button class="toggle" data-toggle-product="${escapeHtml(id)}">${isOpen ? "▾" : "▸"}</button></td>
       <td>${escapeHtml(row.Brand)}</td>
       <td>${productCell}</td>
@@ -259,10 +263,10 @@ function productRowHtml(row) {
       <td>${escapeHtml(row.Priorité)}</td>
       <td class="num">${escapeHtml(row["Erreurs restantes"])}</td>
       <td class="num">${escapeHtml(row["Erreurs approuvées"])}</td>
-      <td class="admin-only"><span class="status ${row["Infos produit"] === "Oui" ? "ok-status" : ""}">${escapeHtml(row["Infos produit"] || "Non")}</span></td>
-      <td class="admin-only">${gptButton}</td>
+      <td><span class="status ${row["Infos produit"] === "Oui" ? "ok-status" : ""}">${escapeHtml(row["Infos produit"] || "Non")}</span></td>
+      <td>${gptButton}</td>
     </tr>
-    ${isOpen ? `<tr class="details"><td colspan="${isAdmin() ? 12 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
+    ${isOpen ? `<tr class="details"><td colspan="${canUseGpt() ? 12 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
   `;
 }
 
@@ -324,6 +328,9 @@ function renderImages() {
   document.querySelectorAll("[data-image-upload]").forEach((input) => {
     input.addEventListener("change", () => uploadProductImages(input));
   });
+  document.querySelectorAll("[data-image-discover]").forEach((button) => {
+    button.addEventListener("click", () => discoverProductImages(button));
+  });
   document.querySelectorAll("[data-image-analyze]").forEach((button) => {
     button.addEventListener("click", () => analyzeProductImages(button));
   });
@@ -349,6 +356,7 @@ function imageRowHtml(row) {
       <td class="row-actions">
         ${row.Lightspeed_Admin_URL ? `<a class="button-link" href="${escapeHtml(row.Lightspeed_Admin_URL)}" target="_blank" rel="noopener noreferrer">Lightspeed</a>` : ""}
         <label class="button-link file-button">Upload<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" data-image-upload="${variantId}" /></label>
+        <button data-image-discover="${escapeHtml(row.Product_ID)}">Chercher fabricant</button>
         <button data-image-analyze="${escapeHtml(row.Product_ID)}">Analyser GPT</button>
         <button data-image-process="${escapeHtml(row.Product_ID)}">Traiter</button>
         <a class="button-link" href="${escapeHtml(productZip)}" target="_blank" rel="noopener noreferrer">ZIP produit</a>
@@ -376,6 +384,28 @@ async function uploadProductImages(input) {
   input.value = "";
   await loadImageMetrics();
   await loadImages();
+}
+
+async function discoverProductImages(button) {
+  const productId = button.dataset.imageDiscover;
+  const sourceUrl = window.prompt("Colle l'URL officielle du fabricant ou la fiche produit fabricant.");
+  if (!sourceUrl) return;
+  button.disabled = true;
+  button.textContent = "Recherche...";
+  try {
+    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/discover`, {
+      method: "POST",
+      body: JSON.stringify({ source_url: sourceUrl, max_images: 8 }),
+    });
+    window.alert(`${result.downloaded || 0} image(s) téléchargée(s) sur ${result.found || 0} trouvée(s).`);
+    await loadImageMetrics();
+    await loadImages();
+  } catch (error) {
+    window.alert(error.message || String(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Chercher fabricant";
+  }
 }
 
 async function analyzeProductImages(button) {
@@ -437,7 +467,7 @@ function renderProductDetail(id, data) {
         <span class="pill">UPC ${escapeHtml(data.product.UPC)}</span>
       </div>
       ${data.product["Type de correction"] ? `<div class="muted">${escapeHtml(data.product["Type de correction"])}</div>` : ""}
-      ${isAdmin() ? `<div class="source-editor">
+      ${canUseGpt() ? `<div class="source-editor">
         <h4>Infos produit / sources GPT</h4>
         <input data-source-url="${escapeHtml(id)}" type="url" placeholder="Lien source officiel ou fournisseur" value="${escapeHtml(sourceInfo.source_url || "")}" />
         <textarea data-source-text="${escapeHtml(id)}" rows="5" placeholder="Colle ici la vraie description fournisseur, les bénéfices officiels, technologies, mode d'emploi ou notes fiables. GPT devra se baser sur ces infos.">${escapeHtml(sourceInfo.source_text || "")}</textarea>
@@ -900,7 +930,7 @@ async function setup() {
     });
   });
 
-  if (isAdmin()) {
+  if (canUseGpt()) {
     const reloadBatchCandidates = debounce(() => loadBatchCandidates());
     $("#batchCandidateSearch").addEventListener("input", () => reloadBatchCandidates());
     const reloadBatchCompleted = debounce(() => loadBatchCompleted());

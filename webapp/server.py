@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import base64
+from html.parser import HTMLParser
 from io import BytesIO
 import mimetypes
 import os
@@ -15,7 +16,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin, urlparse, urldefrag
+from urllib.request import Request as UrlRequest, urlopen
 import uuid
 
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -117,6 +119,11 @@ class BatchSubmitPayload(BaseModel):
 
 class BatchResetPayload(BaseModel):
     variant_ids: list[str]
+
+
+class ImageDiscoverPayload(BaseModel):
+    source_url: str
+    max_images: int = 8
 
 
 def connect() -> sqlite3.Connection:
@@ -264,6 +271,10 @@ def require_admin(x_remote_user: Optional[str]) -> dict[str, str]:
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Accès admin requis")
     return user
+
+
+def require_user(x_remote_user: Optional[str]) -> dict[str, str]:
+    return current_user(x_remote_user)
 
 
 def clean(value: Any) -> str:
@@ -1089,7 +1100,7 @@ def api_save_product_source_info(
     payload: ProductSourcePayload,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     if not find_product(variant_id):
         raise HTTPException(status_code=404, detail="Produit introuvable")
     ensure_product_source_table()
@@ -1113,7 +1124,7 @@ def api_product_autofill_json(
     variant_id: str,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     row = find_product(variant_id)
     if not row:
         raise HTTPException(status_code=404, detail="Produit introuvable")
@@ -1125,7 +1136,7 @@ def api_product_batch_json(
     variant_id: str,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     with connect() as conn:
         item = conn.execute(
@@ -1314,6 +1325,286 @@ def save_upload_bytes(target: Path, data: bytes) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+class ManufacturerImageParser(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.images: list[str] = []
+        self.links: list[tuple[str, str]] = []
+        self._current_link = ""
+        self._current_link_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]):
+        attr = {key.lower(): value or "" for key, value in attrs}
+        if tag == "a":
+            href = clean(attr.get("href"))
+            if href:
+                self._current_link = urljoin(self.base_url, href)
+                self._current_link_text = []
+        if tag in {"img", "source"}:
+            for key in ["src", "data-src", "data-original", "data-image", "data-zoom-image"]:
+                self.add_image(attr.get(key))
+            self.add_srcset(attr.get("srcset") or attr.get("data-srcset"))
+        if tag == "meta":
+            name = (attr.get("property") or attr.get("name") or "").lower()
+            if name in {"og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"}:
+                self.add_image(attr.get("content"))
+        if tag == "link":
+            rel = attr.get("rel", "").lower()
+            if "image_src" in rel:
+                self.add_image(attr.get("href"))
+
+    def handle_data(self, data: str):
+        if self._current_link:
+            self._current_link_text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if tag == "a" and self._current_link:
+            self.links.append((self._current_link, " ".join(self._current_link_text)))
+            self._current_link = ""
+            self._current_link_text = []
+
+    def add_image(self, value: Optional[str]):
+        url = clean(value)
+        if not url:
+            return
+        full_url = urljoin(self.base_url, url)
+        full_url = urldefrag(full_url)[0]
+        parsed = urlparse(full_url)
+        if parsed.scheme in {"http", "https"}:
+            self.images.append(full_url)
+
+    def add_srcset(self, value: Optional[str]):
+        srcset = clean(value)
+        if not srcset:
+            return
+        candidates = []
+        for part in srcset.split(","):
+            bits = part.strip().split()
+            if not bits:
+                continue
+            weight = 0
+            if len(bits) > 1:
+                number = re.sub(r"[^0-9.]", "", bits[-1])
+                try:
+                    weight = int(float(number))
+                except ValueError:
+                    weight = 0
+            candidates.append((weight, bits[0]))
+        for _, url in sorted(candidates, reverse=True):
+            self.add_image(url)
+
+
+def normalized_manufacturer_url(source_url: str) -> str:
+    url = clean(source_url)
+    if not url:
+        raise HTTPException(status_code=400, detail="URL fabricant manquante")
+    if not re.match(r"^https?://", url, re.I):
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="URL fabricant invalide")
+    return url
+
+
+def fetch_url(url: str, max_bytes: int = 8_000_000) -> tuple[bytes, str, int]:
+    request = UrlRequest(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 IndustriaAudit/1.0",
+            "Accept": "text/html,image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise HTTPException(status_code=413, detail="Fichier trop lourd")
+            return data, response.headers.get("content-type", ""), int(response.status)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Impossible de lire l'URL fabricant: {exc}")
+
+
+def parse_manufacturer_page(url: str) -> ManufacturerImageParser:
+    data, content_type, _ = fetch_url(url, max_bytes=4_000_000)
+    if "text/html" not in content_type.lower():
+        raise HTTPException(status_code=400, detail="L'URL fournie ne semble pas être une page web")
+    parser = ManufacturerImageParser(url)
+    parser.feed(data.decode("utf-8", errors="ignore"))
+    return parser
+
+
+def product_search_tokens(row: dict[str, Any]) -> list[str]:
+    raw = " ".join([
+        clean(row.get("Brand")),
+        product_display_title(row),
+        clean(row.get("SKU")),
+        clean(row.get("UPC")),
+    ])
+    tokens = re.findall(r"[a-zA-Z0-9À-ÿ]{3,}", raw.lower())
+    blocked = {"avec", "pour", "the", "and", "les", "des", "une", "produit", "professional"}
+    return [token for token in dict.fromkeys(tokens) if token not in blocked][:16]
+
+
+def score_manufacturer_link(row: dict[str, Any], url: str, text: str) -> int:
+    haystack = f"{url} {text}".lower()
+    score = 0
+    for token in product_search_tokens(row):
+        if token in haystack:
+            score += 2 if len(token) >= 5 else 1
+    if any(word in haystack for word in ["/product", "/products", "/produit", "/shop", "/collections"]):
+        score += 2
+    if any(word in haystack for word in ["blog", "article", "privacy", "account", "cart", "contact"]):
+        score -= 5
+    return score
+
+
+def manufacturer_image_urls(row: dict[str, Any], source_url: str, max_pages: int = 5) -> tuple[list[str], list[str]]:
+    base_url = normalized_manufacturer_url(source_url)
+    parsed_base = urlparse(base_url)
+    pages = [base_url]
+    try:
+        base_parser = parse_manufacturer_page(base_url)
+    except HTTPException:
+        raise
+    same_domain_links = []
+    for href, text in base_parser.links:
+        parsed = urlparse(href)
+        if parsed.netloc == parsed_base.netloc:
+            score = score_manufacturer_link(row, href, text)
+            if score > 0:
+                same_domain_links.append((score, href))
+    for _, href in sorted(same_domain_links, reverse=True):
+        if href not in pages:
+            pages.append(href)
+        if len(pages) >= max_pages:
+            break
+
+    images = list(base_parser.images)
+    visited_pages = [base_url]
+    for page_url in pages[1:]:
+        try:
+            parser = parse_manufacturer_page(page_url)
+        except HTTPException:
+            continue
+        visited_pages.append(page_url)
+        images.extend(parser.images)
+
+    filtered = []
+    seen = set()
+    for image_url in images:
+        lowered = image_url.lower()
+        if any(skip in lowered for skip in [".svg", ".gif", "logo", "icon", "sprite", "placeholder"]):
+            continue
+        if image_url in seen:
+            continue
+        seen.add(image_url)
+        filtered.append(image_url)
+    return filtered, visited_pages
+
+
+def downloaded_image_extension(content_type: str, source_url: str) -> str:
+    mime = content_type.split(";")[0].strip().lower()
+    if mime in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if mime == "image/png":
+        return ".png"
+    if mime == "image/webp":
+        return ".webp"
+    extension = Path(urlparse(source_url).path).suffix.lower()
+    if extension in {".jpg", ".jpeg", ".png", ".webp"}:
+        return ".jpg" if extension == ".jpeg" else extension
+    return ".jpg"
+
+
+def save_discovered_image(row: dict[str, Any], source_url: str, source_page: str) -> bool:
+    try:
+        data, content_type, http_status = fetch_url(source_url)
+    except HTTPException:
+        return False
+    if not content_type.lower().split(";")[0].startswith("image/"):
+        return False
+    try:
+        from PIL import Image
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:
+        return False
+    if max(width, height) < 500 or min(width, height) < 300:
+        return False
+
+    product_key = product_image_product_id(row)
+    variant_id = product_id(row)
+    file_hash = hashlib.sha256(data).hexdigest()
+    now = now_text()
+    with connect() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM product_image_candidates WHERE product_id = ? AND file_hash = ? LIMIT 1",
+            (product_key, file_hash),
+        ).fetchone()
+        if exists:
+            return False
+        extension = downloaded_image_extension(content_type, source_url)
+        candidate_id = str(uuid.uuid4())
+        image_id = str(uuid.uuid4())
+        base_name = seo_slug(f"{clean(row.get('Brand'))} {product_display_title(row)}", product_key)
+        filename = f"{base_name}-fabricant-{image_id[:8]}{extension}"
+        original_path = IMAGE_DATA_DIR / "originals" / product_key / filename
+        candidate_path = IMAGE_DATA_DIR / "candidates" / product_key / filename
+        save_upload_bytes(original_path, data)
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(original_path, candidate_path)
+        source_domain = urlparse(source_url).netloc
+        size_kb = round(len(data) / 1024, 2)
+        conn.execute(
+            """
+            INSERT INTO product_image_candidates
+            (id, product_id, variant_id, source_url, source_domain, source_type, original_filename,
+             original_path, file_hash, width, height, file_size_kb, mime_type, http_status,
+             download_status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'manufacturer_site', ?, ?, ?, ?, ?, ?, ?, ?, 'saved', ?)
+            """,
+            (
+                candidate_id,
+                product_key,
+                variant_id,
+                source_url,
+                source_domain,
+                filename,
+                str(candidate_path),
+                file_hash,
+                width,
+                height,
+                size_kb,
+                content_type,
+                http_status,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO product_images
+            (id, product_id, variant_id, candidate_id, original_filename, original_path,
+             image_role, status, quality_report_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'validation_requise', 'validation_requise', ?, ?, ?)
+            """,
+            (
+                image_id,
+                product_key,
+                variant_id,
+                candidate_id,
+                filename,
+                str(original_path),
+                json.dumps({"source_page": source_page, "source_url": source_url}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+    return True
 
 
 def find_product_by_image_product_id(product_key: str) -> Optional[dict[str, Any]]:
@@ -1526,6 +1817,34 @@ async def api_image_upload(
             )
             saved += 1
     return {"ok": True, "saved": saved}
+
+
+@app.post("/api/images/products/{product_key}/discover")
+def api_image_discover_product(
+    product_key: str,
+    payload: ImageDiscoverPayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_image_tables()
+    row = find_product_by_image_product_id(product_key)
+    if not row:
+        raise HTTPException(status_code=404, detail="Produit introuvable")
+
+    max_images = max(1, min(payload.max_images, 20))
+    image_urls, visited_pages = manufacturer_image_urls(row, payload.source_url)
+    downloaded = 0
+    for image_url in image_urls:
+        if save_discovered_image(row, image_url, visited_pages[0]):
+            downloaded += 1
+        if downloaded >= max_images:
+            break
+    return {
+        "ok": True,
+        "downloaded": downloaded,
+        "found": len(image_urls),
+        "pages": visited_pages,
+    }
 
 
 @app.post("/api/images/products/{product_key}/analyze")
@@ -1763,7 +2082,7 @@ def api_gpt_batch_candidates(
     limit: int = 200,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     approvals = load_approvals()
     processed_brands = load_processed_brands()
@@ -1808,7 +2127,7 @@ def api_gpt_batch_queue(
     payload: BatchQueuePayload,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     products = load_products()
     product_map = {product_id(row): row for row in products}
@@ -1916,7 +2235,7 @@ def api_gpt_batch_queue_and_submit(
     payload: BatchQueuePayload,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     queue_result = api_gpt_batch_queue(
         BatchQueuePayload(variant_ids=payload.variant_ids, limit=payload.limit, force=True),
         x_remote_user=x_remote_user,
@@ -1933,7 +2252,7 @@ def api_gpt_batch_reset_items(
     payload: BatchResetPayload,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     variant_ids = [str(item) for item in payload.variant_ids if str(item).strip()]
     if not variant_ids:
@@ -1965,7 +2284,7 @@ def api_gpt_batch_reset_items(
 def api_gpt_batch_clear_pending(
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     with connect() as conn:
         result = conn.execute("DELETE FROM gpt_batch_items WHERE status = 'pending'")
@@ -1979,7 +2298,7 @@ def api_gpt_batch_items(
     limit: int = 200,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     params: list[Any] = [status]
     where = "status = ?"
@@ -2031,7 +2350,7 @@ def api_gpt_batch_submit(
     payload: BatchSubmitPayload,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     limit = max(1, min(payload.limit, 500))
     with connect() as conn:
@@ -2157,7 +2476,7 @@ def api_gpt_batch_submit(
 def api_gpt_batch_sync(
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     synced = 0
     now = now_text()
@@ -2234,7 +2553,7 @@ def api_gpt_batch_approve(
     variant_id: str,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     with connect() as conn:
         conn.execute(
@@ -2254,7 +2573,7 @@ def api_gpt_batch_restore(
     variant_id: str,
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
-    require_admin(x_remote_user)
+    require_user(x_remote_user)
     ensure_batch_tables()
     with connect() as conn:
         result = conn.execute(
