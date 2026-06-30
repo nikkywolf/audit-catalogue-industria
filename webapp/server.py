@@ -239,6 +239,17 @@ def load_approvals() -> set[tuple[str, str]]:
     return {(str(row["Internal_Variant_ID"]), str(row["Erreur"])) for row in rows}
 
 
+def load_gpt_batch_product_keys() -> tuple[set[str], set[str]]:
+    ensure_batch_tables()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT Internal_Variant_ID, Internal_ID FROM gpt_batch_items"
+        ).fetchall()
+    variant_ids = {str(row["Internal_Variant_ID"]) for row in rows if row["Internal_Variant_ID"]}
+    internal_ids = {str(row["Internal_ID"]) for row in rows if row["Internal_ID"]}
+    return variant_ids, internal_ids
+
+
 def load_processed_brands() -> set[str]:
     with connect() as conn:
         rows = conn.execute("SELECT Brand FROM brand_settings").fetchall()
@@ -852,14 +863,23 @@ def filter_products(
     products: list[dict[str, Any]],
     approvals: set[tuple[str, str]],
     processed_brands: set[str],
+    excluded_variant_ids: Optional[set[str]] = None,
+    excluded_internal_ids: Optional[set[str]] = None,
     search: str = "",
     brand: str = "",
     priority: str = "",
     correction: str = "",
     approval: str = "pending",
 ) -> list[dict[str, Any]]:
+    excluded_variant_ids = excluded_variant_ids or set()
+    excluded_internal_ids = excluded_internal_ids or set()
     result = []
     for row in products:
+        if product_id(row) in excluded_variant_ids:
+            continue
+        internal_id = product_internal_id(row)
+        if internal_id and internal_id in excluded_internal_ids:
+            continue
         row_brand = clean(row.get("Brand"))
         if processed_brands and row_brand not in processed_brands:
             continue
@@ -956,10 +976,13 @@ def api_products(
     products = load_products()
     approvals = load_approvals()
     processed_brands = load_processed_brands()
+    gpt_variant_ids, gpt_internal_ids = load_gpt_batch_product_keys()
     filtered = filter_products(
         products,
         approvals,
         processed_brands,
+        excluded_variant_ids=gpt_variant_ids,
+        excluded_internal_ids=gpt_internal_ids,
         search=search,
         brand=brand,
         priority=priority,
