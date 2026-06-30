@@ -444,6 +444,44 @@ def is_matrix_product(row: dict[str, Any], matrix_ids: Optional[set[str]] = None
     return internal_id in (matrix_ids if matrix_ids is not None else matrix_product_ids())
 
 
+def product_family_title(value: str, sku: str = "") -> str:
+    text = clean(value).lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+    text = re.sub(r"\s*-\s*[a-z0-9._/]+$", "", text).strip()
+    if sku:
+        text = re.sub(rf"\b{re.escape(sku.lower())}\b", "", text).strip()
+    text = re.sub(
+        r"\([^)]*(?:ml|oz|fl\.?\s*oz|g|gr|kg|l|litre|liter|un|po|in|mm|cm|w|v|inch|ounces?)[^)]*\)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b\d+(?:[.,]\d+)?\s*(?:ml|oz|fl\.?\s*oz|g|gr|kg|l|litre|liter|un|po|in|mm|cm|w|v|inch|ounces?)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b\d+\s*[xX]\s*\d+(?:[.,]\d+)?\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def product_family_key(row: dict[str, Any]) -> str:
+    brand = clean(row.get("Brand")).lower()
+    title = (
+        clean(row.get("FC_Title_Short"))
+        or clean(row.get("FR_Title_Short"))
+        or clean(row.get("US_Title_Short"))
+        or clean(row.get("Product_Title"))
+    )
+    family_title = product_family_title(title, clean(row.get("SKU")))
+    if not brand or not family_title:
+        return product_id(row)
+    return f"{brand}|{family_title}"
+
+
 def lightspeed_admin_url(row: dict[str, Any]) -> str:
     internal_id = product_internal_id(row)
     if not internal_id:
@@ -2385,9 +2423,11 @@ def api_gpt_batch_submit(
 
     batch_lines = []
     now = now_text()
-    request_by_variant = {}
+    request_by_custom_id = {}
+    variants_by_custom_id: dict[str, list[str]] = {}
     matrix_ids = matrix_product_ids()
     submitted_matrix_ids: set[str] = set()
+    submitted_family_keys: set[str] = set()
     for item in rows:
         row = find_product(item["Internal_Variant_ID"])
         if not row:
@@ -2397,13 +2437,27 @@ def api_gpt_batch_submit(
         if is_matrix_product(row, matrix_ids):
             if internal_id in submitted_matrix_ids:
                 continue
+        family_key = product_family_key(row)
         if not force and is_masked_product(row):
             continue
         if not force and not is_batch_correctable(row):
             continue
+        family_custom_id = ""
+        if not is_matrix_product(row, matrix_ids) and family_key in submitted_family_keys:
+            for existing_custom_id, variant_ids in variants_by_custom_id.items():
+                first_row = find_product(variant_ids[0])
+                if first_row and product_family_key(first_row) == family_key:
+                    family_custom_id = existing_custom_id
+                    break
+            if family_custom_id:
+                variants_by_custom_id.setdefault(family_custom_id, []).append(str(item["Internal_Variant_ID"]))
+                continue
         if is_matrix_product(row, matrix_ids):
             submitted_matrix_ids.add(internal_id)
+        else:
+            submitted_family_keys.add(family_key)
         custom_id = str(item["Internal_Variant_ID"])
+        variants_by_custom_id.setdefault(custom_id, []).append(custom_id)
         request_body = {
             "model": os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
             "messages": product_autofill_prompt(row),
@@ -2417,7 +2471,7 @@ def api_gpt_batch_submit(
             "body": request_body,
         }
         batch_lines.append(json.dumps(request_record, ensure_ascii=False))
-        request_by_variant[custom_id] = json.dumps(request_record, ensure_ascii=False)
+        request_by_custom_id[custom_id] = json.dumps(request_record, ensure_ascii=False)
 
     if not batch_lines:
         return {"ok": False, "message": "Aucun produit valide à envoyer."}
@@ -2455,21 +2509,23 @@ def api_gpt_batch_submit(
                 now,
             ),
         )
-        for custom_id, request_json in request_by_variant.items():
-            conn.execute(
-                """
-                UPDATE gpt_batch_items
-                SET status = 'submitted',
-                    batch_id = ?,
-                    custom_id = ?,
-                    request_json = ?,
-                    updated_at = ?
-                WHERE Internal_Variant_ID = ?
-                """,
-                (batch_id, custom_id, request_json, now, custom_id),
-            )
+        for custom_id, request_json in request_by_custom_id.items():
+            for variant_id in variants_by_custom_id.get(custom_id, [custom_id]):
+                conn.execute(
+                    """
+                    UPDATE gpt_batch_items
+                    SET status = 'submitted',
+                        batch_id = ?,
+                        custom_id = ?,
+                        request_json = ?,
+                        updated_at = ?
+                    WHERE Internal_Variant_ID = ?
+                    """,
+                    (batch_id, custom_id, request_json, now, variant_id),
+                )
 
-    return {"ok": True, "batch_id": batch_id, "count": len(request_by_variant)}
+    submitted_items_count = sum(len(items) for items in variants_by_custom_id.values())
+    return {"ok": True, "batch_id": batch_id, "count": submitted_items_count, "requests": len(request_by_custom_id)}
 
 
 @app.post("/api/gpt-batches/sync")
@@ -2514,21 +2570,32 @@ def api_gpt_batch_sync(
                 body = response.get("body") or {}
                 try:
                     result_text = body["choices"][0]["message"]["content"]
-                    row = find_product(custom_id) or {}
-                    result_payload = sanitize_gpt_json(row, json.loads(result_text))
-                    result_json = json.dumps(result_payload, ensure_ascii=False, indent=2)
-                    conn.execute(
+                    raw_payload = json.loads(result_text)
+                    linked_items = conn.execute(
                         """
-                        UPDATE gpt_batch_items
-                        SET status = 'completed',
-                            result_json = ?,
-                            error = '',
-                            updated_at = ?
-                        WHERE Internal_Variant_ID = ?
+                        SELECT Internal_Variant_ID
+                        FROM gpt_batch_items
+                        WHERE batch_id = ? AND custom_id = ?
                         """,
-                        (result_json, now, custom_id),
-                    )
-                    synced += 1
+                        (local_batch["batch_id"], custom_id),
+                    ).fetchall()
+                    for linked_item in linked_items:
+                        linked_variant_id = linked_item["Internal_Variant_ID"]
+                        row = find_product(linked_variant_id) or find_product(custom_id) or {}
+                        result_payload = sanitize_gpt_json(row, raw_payload)
+                        result_json = json.dumps(result_payload, ensure_ascii=False, indent=2)
+                        conn.execute(
+                            """
+                            UPDATE gpt_batch_items
+                            SET status = 'completed',
+                                result_json = ?,
+                                error = '',
+                                updated_at = ?
+                            WHERE Internal_Variant_ID = ?
+                            """,
+                            (result_json, now, linked_variant_id),
+                        )
+                        synced += 1
                 except Exception as exc:
                     conn.execute(
                         """

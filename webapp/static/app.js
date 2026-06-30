@@ -950,7 +950,7 @@ async function setup() {
         body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length, force: true }),
       });
       state.selectedProductIds.clear();
-      window.alert(result.batch_id ? `${result.count || 0} produit(s) envoyé(s) à OpenAI.` : (result.message || "Aucun produit envoyé."));
+      window.alert(result.batch_id ? `${result.count || 0} produit(s) envoyé(s) à OpenAI en ${result.requests || result.count || 0} requête(s).` : (result.message || "Aucun produit envoyé."));
       await loadProducts();
       await loadGptBatchPage();
     });
@@ -969,7 +969,7 @@ async function setup() {
         body: JSON.stringify({ limit: 50 }),
       });
       if (result.batch_id) {
-        window.alert(`${result.count} produits envoyés à OpenAI.`);
+        window.alert(`${result.count} produit(s) envoyé(s) à OpenAI en ${result.requests || result.count} requête(s).`);
       } else if (result.message) {
         window.alert(result.message);
       }
