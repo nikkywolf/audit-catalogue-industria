@@ -183,8 +183,10 @@ async function loadProducts() {
 function updateProductBatchSelectionUi() {
   const selectedCount = state.selectedProductIds.size;
   const button = $("#sendSelectedProductsBatch");
+  const approveButton = $("#approveSelectedErrors");
   const count = $("#selectedProductsCount");
   if (button) button.disabled = selectedCount === 0;
+  if (approveButton) approveButton.disabled = selectedCount === 0;
   if (count) count.textContent = selectedCount ? `${selectedCount} sélectionné(s)` : "";
   const selectAll = document.querySelector("[data-select-visible-products]");
   if (selectAll) {
@@ -763,6 +765,25 @@ async function setup() {
       window.alert(result.batch_id ? `${result.count || 0} produit(s) envoyé(s) à OpenAI en ${result.requests || result.count || 0} requête(s).` : (result.message || "Aucun produit envoyé."));
       await loadProducts();
       await loadGptBatchPage();
+    });
+    $("#approveSelectedErrors").addEventListener("click", async () => {
+      const selectedIds = [...state.selectedProductIds];
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit.");
+        return;
+      }
+      const ok = window.confirm(`Approuver toutes les erreurs restantes de ${selectedIds.length} produit(s) sélectionné(s)?`);
+      if (!ok) return;
+      const result = await api("/api/approvals/bulk", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds }),
+      });
+      state.selectedProductIds.clear();
+      state.openProductId = null;
+      window.alert(`${result.approved || 0} erreur(s) approuvée(s) sur ${result.products || 0} produit(s).`);
+      await loadProducts();
+      await loadBootstrap();
+      await loadIgnored();
     });
     $("#queueBatchCandidates").addEventListener("click", async () => {
       await api("/api/gpt-batches/queue", {

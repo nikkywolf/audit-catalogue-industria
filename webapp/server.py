@@ -75,6 +75,10 @@ class ApprovalPayload(BaseModel):
     error: str
 
 
+class BulkApprovalPayload(BaseModel):
+    variant_ids: list[str]
+
+
 class TodoPayload(BaseModel):
     tache: str
     description: str = ""
@@ -1015,6 +1019,43 @@ def api_approve(payload: ApprovalPayload):
             ),
         )
     return {"ok": True}
+
+
+@app.post("/api/approvals/bulk")
+def api_approve_all_selected(payload: BulkApprovalPayload):
+    variant_ids = [clean(item) for item in payload.variant_ids if clean(item)]
+    if not variant_ids:
+        return {"ok": True, "approved": 0, "products": 0}
+
+    products_by_id = {product_id(row): row for row in load_products()}
+    approvals = load_approvals()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    approved = 0
+    touched_products = 0
+    with connect() as conn:
+        for variant_id in variant_ids:
+            row = products_by_id.get(variant_id)
+            if not row:
+                continue
+            product_approved = 0
+            for item in row_errors(row):
+                error = item["error"]
+                if (variant_id, error) in approvals:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO approvals
+                    (Internal_Variant_ID, Type, Erreur, Date)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (variant_id, item["type"], error, now),
+                )
+                approvals.add((variant_id, error))
+                approved += 1
+                product_approved += 1
+            if product_approved:
+                touched_products += 1
+    return {"ok": True, "approved": approved, "products": touched_products}
 
 
 @app.delete("/api/approvals")
