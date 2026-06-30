@@ -11,9 +11,6 @@ const state = {
   ignoredBrands: [],
   activeBrandsTotal: 0,
   ignoredBrandsTotal: 0,
-  imageRows: [],
-  imageTotal: 0,
-  imageRequestId: 0,
   batchCandidates: [],
   batchPending: [],
   batchSubmitted: [],
@@ -73,8 +70,6 @@ async function loadPageData(pageId, force = false) {
     await loadTodos();
   } else if (pageId === "admin") {
     await loadBrandsAdmin();
-  } else if (pageId === "images" && isAdmin()) {
-    await loadImagesPage();
   } else if (pageId === "gptBatch" && canUseGpt()) {
     await loadGptBatchPage();
   }
@@ -119,7 +114,6 @@ async function loadBootstrap() {
   ].join("");
 
   fillSelect($("#brandFilter"), data.processed_brands, "Toutes les marques");
-  fillSelect($("#imageBrandFilter"), data.processed_brands, "Toutes les marques");
   fillSelect($("#priorityFilter"), data.priorities, "Toutes priorités");
   fillSelect($("#correctionFilter"), data.correction_types, "Tous types");
   renderBrandSummary(data.brand_summary);
@@ -137,9 +131,6 @@ function applyRoleVisibility() {
   document.querySelectorAll(".admin-only").forEach((element) => {
     element.style.display = isAdmin() ? "" : "none";
   });
-  if (!isAdmin() && document.querySelector("#images").classList.contains("active")) {
-    setPage("overview");
-  }
 }
 
 function renderBrandSummary(rows) {
@@ -268,180 +259,6 @@ function productRowHtml(row) {
     </tr>
     ${isOpen ? `<tr class="details"><td colspan="${canUseGpt() ? 12 : 9}" id="product-detail-${escapeHtml(id)}">Chargement...</td></tr>` : ""}
   `;
-}
-
-function imageQuery() {
-  const params = new URLSearchParams();
-  params.set("search", $("#imageSearch").value);
-  params.set("brand", $("#imageBrandFilter").value);
-  params.set("status", $("#imageStatusFilter").value);
-  params.set("limit", $("#imageLimitFilter").value);
-  return params.toString();
-}
-
-async function loadImagesPage() {
-  await loadImageMetrics();
-  await loadImages();
-}
-
-async function loadImageMetrics() {
-  const data = await api("/api/images/metrics");
-  $("#imageMetrics").innerHTML = [
-    metric("Analysables", data.total_analysable),
-    metric("Sans image", data.sans_image),
-    metric("Sans principale", data.sans_principale),
-    metric("Validation", data.validation_requise),
-    metric("Conformes", data.conformes),
-    metric("Marques exclues", data.marques_ignorees_exclues),
-  ].join("");
-}
-
-async function loadImages() {
-  const requestId = ++state.imageRequestId;
-  $("#imageCount").textContent = "Chargement des produits images...";
-  $("#imageProductsTable").innerHTML = '<div class="muted">Chargement...</div>';
-  try {
-    const data = await api(`/api/images/products?${imageQuery()}`);
-    if (requestId !== state.imageRequestId) return;
-    state.imageRows = data.items;
-    state.imageTotal = data.total;
-    $("#imageCount").textContent = `Produits images affichés : ${data.total}`;
-    renderImages();
-  } catch (error) {
-    if (requestId !== state.imageRequestId) return;
-    $("#imageCount").textContent = "Erreur de chargement";
-    $("#imageProductsTable").innerHTML = `<div class="error-box">${escapeHtml(error.message || String(error))}</div>`;
-  }
-}
-
-function renderImages() {
-  $("#imageProductsTable").innerHTML = `
-    <table>
-      <thead>
-        <tr><th>Marque</th><th>Gamme</th><th>Produit</th><th>ID</th><th>Images</th><th>Statut</th><th>Actions</th></tr>
-      </thead>
-      <tbody>
-        ${state.imageRows.map((row) => imageRowHtml(row)).join("") || '<tr><td colspan="7" class="muted">Aucun produit.</td></tr>'}
-      </tbody>
-    </table>
-  `;
-  document.querySelectorAll("[data-image-upload]").forEach((input) => {
-    input.addEventListener("change", () => uploadProductImages(input));
-  });
-  document.querySelectorAll("[data-image-discover]").forEach((button) => {
-    button.addEventListener("click", () => discoverProductImages(button));
-  });
-  document.querySelectorAll("[data-image-analyze]").forEach((button) => {
-    button.addEventListener("click", () => analyzeProductImages(button));
-  });
-  document.querySelectorAll("[data-image-process]").forEach((button) => {
-    button.addEventListener("click", () => processProductImages(button));
-  });
-}
-
-function imageRowHtml(row) {
-  const variantId = escapeHtml(row.Internal_Variant_ID);
-  const brand = encodeURIComponent(row.Brand);
-  const productId = encodeURIComponent(row.Product_ID);
-  const productZip = `/api/images/export.zip?scope=product&product_id=${productId}`;
-  const brandZip = `/api/images/export.zip?scope=brand&brand=${brand}`;
-  return `
-    <tr>
-      <td>${escapeHtml(row.Brand)}</td>
-      <td>${escapeHtml(row.Gamme)}</td>
-      <td>${escapeHtml(row.Produit)}</td>
-      <td>${escapeHtml(row.Product_ID)}</td>
-      <td>${escapeHtml(row.Images)} (${escapeHtml(row.Principale)} principale)</td>
-      <td><span class="status">${escapeHtml(row["Statut image"])}</span></td>
-      <td class="row-actions">
-        ${row.Lightspeed_Admin_URL ? `<a class="button-link" href="${escapeHtml(row.Lightspeed_Admin_URL)}" target="_blank" rel="noopener noreferrer">Lightspeed</a>` : ""}
-        <label class="button-link file-button">Upload<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" data-image-upload="${variantId}" /></label>
-        <button data-image-discover="${escapeHtml(row.Product_ID)}">Chercher fabricant</button>
-        <button data-image-analyze="${escapeHtml(row.Product_ID)}">Analyser GPT</button>
-        <button data-image-process="${escapeHtml(row.Product_ID)}">Traiter</button>
-        <a class="button-link" href="${escapeHtml(productZip)}" target="_blank" rel="noopener noreferrer">ZIP produit</a>
-        <a class="button-link" href="${escapeHtml(brandZip)}" target="_blank" rel="noopener noreferrer">ZIP marque</a>
-      </td>
-    </tr>
-  `;
-}
-
-async function uploadProductImages(input) {
-  if (!input.files || input.files.length === 0) return;
-  const form = new FormData();
-  [...input.files].forEach((file) => form.append("files", file));
-  const response = await fetch(`/api/images/products/${encodeURIComponent(input.dataset.imageUpload)}/upload`, {
-    method: "POST",
-    body: form,
-  });
-  if (!response.ok) {
-    window.alert(await response.text());
-    input.value = "";
-    return;
-  }
-  const result = await response.json();
-  window.alert(`${result.saved || 0} image(s) ajoutée(s).`);
-  input.value = "";
-  await loadImageMetrics();
-  await loadImages();
-}
-
-async function discoverProductImages(button) {
-  const productId = button.dataset.imageDiscover;
-  const sourceUrl = window.prompt("Colle l'URL officielle du fabricant ou la fiche produit fabricant.");
-  if (!sourceUrl) return;
-  button.disabled = true;
-  button.textContent = "Recherche...";
-  try {
-    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/discover`, {
-      method: "POST",
-      body: JSON.stringify({ source_url: sourceUrl, max_images: 8 }),
-    });
-    window.alert(`${result.downloaded || 0} image(s) téléchargée(s) sur ${result.found || 0} trouvée(s).`);
-    await loadImageMetrics();
-    await loadImages();
-  } catch (error) {
-    window.alert(error.message || String(error));
-  } finally {
-    button.disabled = false;
-    button.textContent = "Chercher fabricant";
-  }
-}
-
-async function analyzeProductImages(button) {
-  const productId = button.dataset.imageAnalyze;
-  const ok = window.confirm("Analyser les images de ce produit avec GPT Vision? Cette action utilise l'API OpenAI.");
-  if (!ok) return;
-  button.disabled = true;
-  button.textContent = "Analyse...";
-  try {
-    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/analyze`, { method: "POST" });
-    window.alert(`${result.analyzed || 0} image(s) analysée(s).`);
-    await loadImageMetrics();
-    await loadImages();
-  } catch (error) {
-    window.alert(error.message || String(error));
-  } finally {
-    button.disabled = false;
-    button.textContent = "Analyser GPT";
-  }
-}
-
-async function processProductImages(button) {
-  const productId = button.dataset.imageProcess;
-  button.disabled = true;
-  button.textContent = "Traitement...";
-  try {
-    const result = await api(`/api/images/products/${encodeURIComponent(productId)}/process`, { method: "POST" });
-    window.alert(`${result.processed || 0} image(s) traitée(s).`);
-    await loadImageMetrics();
-    await loadImages();
-  } catch (error) {
-    window.alert(error.message || String(error));
-  } finally {
-    button.disabled = false;
-    button.textContent = "Traiter";
-  }
 }
 
 async function toggleProduct(id) {
@@ -921,13 +738,6 @@ async function setup() {
   const reloadBrands = debounce(() => loadBrandsAdmin());
   $("#brandAdminSearch").addEventListener("input", () => {
     reloadBrands();
-  });
-
-  const reloadImages = debounce(() => loadImages());
-  ["imageSearch", "imageBrandFilter", "imageStatusFilter", "imageLimitFilter"].forEach((id) => {
-    $(`#${id}`).addEventListener("input", () => {
-      reloadImages();
-    });
   });
 
   if (canUseGpt()) {
