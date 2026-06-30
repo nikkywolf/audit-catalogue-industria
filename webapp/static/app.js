@@ -757,14 +757,14 @@ async function setup() {
         window.alert("Sélectionne au moins un produit.");
         return;
       }
-      const ok = window.confirm(`Envoyer ${selectedIds.length} produit(s) sélectionné(s) en batch GPT?`);
+      const ok = window.confirm(`Ajouter ${selectedIds.length} produit(s) sélectionné(s) à l'attente Batch GPT?`);
       if (!ok) return;
-      const result = await api("/api/gpt-batches/queue-and-submit", {
+      const result = await api("/api/gpt-batches/queue", {
         method: "POST",
         body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length, force: true }),
       });
       state.selectedProductIds.clear();
-      window.alert(result.batch_id ? `${result.count || 0} produit(s) envoyé(s) à OpenAI en ${result.requests || result.count || 0} requête(s).` : (result.message || "Aucun produit envoyé."));
+      window.alert(`${result.created || 0} produit(s) ajouté(s) à l'attente Batch GPT.`);
       await loadProducts();
       await loadGptBatchPage();
     });
