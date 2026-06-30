@@ -797,6 +797,57 @@ def product_matches_search(row: dict[str, Any], search: str) -> bool:
     return search.lower() in haystack
 
 
+def effective_priority(row: dict[str, Any], approvals: set[tuple[str, str]]) -> str:
+    summary = summarize_product(row, approvals)
+    if summary["Erreurs restantes"] == 0:
+        return "Conforme"
+    return clean(row.get("Priorité"))
+
+
+def adjusted_brand_summary(products: list[dict[str, Any]], approvals: set[tuple[str, str]]) -> list[dict[str, Any]]:
+    by_brand: dict[str, dict[str, Any]] = {}
+    for row in products:
+        brand = clean(row.get("Brand"))
+        if not brand:
+            continue
+        item = by_brand.setdefault(
+            brand,
+            {
+                "Brand": brand,
+                "Produits": 0,
+                "Score_total": 0.0,
+                "Conformes": 0,
+                "A_surveillance": 0,
+                "Action_requise": 0,
+                "Critiques": 0,
+            },
+        )
+        item["Produits"] += 1
+        try:
+            item["Score_total"] += float(row.get("Score") or 0)
+        except (TypeError, ValueError):
+            pass
+        priority = effective_priority(row, approvals)
+        if priority == "Conforme":
+            item["Conformes"] += 1
+        elif priority == "À surveiller":
+            item["A_surveillance"] += 1
+        elif priority == "Action requise":
+            item["Action_requise"] += 1
+        elif priority == "Critique":
+            item["Critiques"] += 1
+
+    rows = []
+    for item in by_brand.values():
+        products_count = item["Produits"] or 1
+        score = item.pop("Score_total", 0.0)
+        item["Score_moyen"] = round(score / products_count, 1)
+        item["% conformes"] = round(item["Conformes"] / products_count * 100, 1)
+        item["% critiques"] = round(item["Critiques"] / products_count * 100, 1)
+        rows.append(item)
+    return sorted(rows, key=lambda item: (item["Critiques"], item["Action_requise"], item["Produits"]), reverse=True)
+
+
 def filter_products(
     products: list[dict[str, Any]],
     approvals: set[tuple[str, str]],
@@ -874,9 +925,9 @@ def api_bootstrap():
     return {
         "metrics": {
             "products": len(active_products),
-            "conformes": sum(1 for row in active_products if clean(row.get("Priorité")) == "Conforme"),
-            "action_required": sum(1 for row in active_products if clean(row.get("Priorité")) == "Action requise"),
-            "critical": sum(1 for row in active_products if clean(row.get("Priorité")) == "Critique"),
+            "conformes": sum(1 for row in active_products if effective_priority(row, approvals) == "Conforme"),
+            "action_required": sum(1 for row in active_products if effective_priority(row, approvals) == "Action requise"),
+            "critical": sum(1 for row in active_products if effective_priority(row, approvals) == "Critique"),
             "approved_errors": sum(summarize_product(row, approvals)["Erreurs approuvées"] for row in active_products),
             "ecom_products": len(products),
             "ignored_products": ignored_count,
@@ -885,7 +936,7 @@ def api_bootstrap():
         "processed_brands": sorted(processed_brands),
         "priorities": priorities,
         "correction_types": correction_types,
-        "brand_summary": load_brand_summary(),
+        "brand_summary": adjusted_brand_summary(active_products, approvals),
         "history": history,
         "latest_audit": dict(latest_audit) if latest_audit else None,
         "latest_sync": dict(latest_sync) if latest_sync else None,
