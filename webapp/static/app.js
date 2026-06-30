@@ -609,8 +609,19 @@ async function loadBatchPending() {
   $("#batchPendingTable").innerHTML = batchItemsTableHtml(
     state.batchPending,
     `En attente : ${data.total}`,
-    false
+    false,
+    true,
+    false,
+    "pending"
   );
+  const selectAll = document.querySelector("[data-batch-select-all='pending']");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      document.querySelectorAll("[data-batch-select='pending']").forEach((checkbox) => {
+        checkbox.checked = selectAll.checked;
+      });
+    });
+  }
 }
 
 async function loadBatchSubmitted() {
@@ -814,11 +825,13 @@ async function setup() {
       await loadGptBatchPage();
     });
     $("#submitGptBatch").addEventListener("click", async () => {
-      const ok = window.confirm("Envoyer les produits en attente à l'API OpenAI Batch?");
+      const selectedIds = [...document.querySelectorAll("[data-batch-select='pending']:checked")].map((input) => input.value);
+      const detail = selectedIds.length ? `${selectedIds.length} produit(s) sélectionné(s)` : "les 50 premiers produits en attente";
+      const ok = window.confirm(`Envoyer ${detail} à l'API OpenAI Batch?`);
       if (!ok) return;
       const result = await api("/api/gpt-batches/submit", {
         method: "POST",
-        body: JSON.stringify({ limit: 50 }),
+        body: JSON.stringify(selectedIds.length ? { variant_ids: selectedIds, limit: selectedIds.length } : { limit: 50 }),
       });
       if (result.batch_id) {
         window.alert(`${result.count} produit(s) envoyé(s) à OpenAI en ${result.requests || result.count} requête(s).`);
