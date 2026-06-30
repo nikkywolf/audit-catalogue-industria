@@ -184,9 +184,11 @@ function updateProductBatchSelectionUi() {
   const selectedCount = state.selectedProductIds.size;
   const button = $("#sendSelectedProductsBatch");
   const approveButton = $("#approveSelectedErrors");
+  const ignoreButton = $("#ignoreSelectedProducts");
   const count = $("#selectedProductsCount");
   if (button) button.disabled = selectedCount === 0;
   if (approveButton) approveButton.disabled = selectedCount === 0;
+  if (ignoreButton) ignoreButton.disabled = selectedCount === 0;
   if (count) count.textContent = selectedCount ? `${selectedCount} sélectionné(s)` : "";
   const selectAll = document.querySelector("[data-select-visible-products]");
   if (selectAll) {
@@ -781,6 +783,25 @@ async function setup() {
       state.selectedProductIds.clear();
       state.openProductId = null;
       window.alert(`${result.approved || 0} erreur(s) approuvée(s) sur ${result.products || 0} produit(s).`);
+      await loadProducts();
+      await loadBootstrap();
+      await loadIgnored();
+    });
+    $("#ignoreSelectedProducts").addEventListener("click", async () => {
+      const selectedIds = [...state.selectedProductIds];
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit.");
+        return;
+      }
+      const ok = window.confirm(`Ignorer ${selectedIds.length} produit(s) sélectionné(s)? Ils iront dans Produits ignorés.`);
+      if (!ok) return;
+      const result = await api("/api/ignored/bulk", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds }),
+      });
+      state.selectedProductIds.clear();
+      state.openProductId = null;
+      window.alert(`${result.ignored || 0} produit(s) ignoré(s).`);
       await loadProducts();
       await loadBootstrap();
       await loadIgnored();

@@ -1109,6 +1109,32 @@ def api_approve_all_selected(payload: BulkApprovalPayload):
     return {"ok": True, "approved": approved, "products": touched_products}
 
 
+@app.post("/api/ignored/bulk")
+def api_ignore_selected_products(payload: BulkApprovalPayload):
+    variant_ids = [clean(item) for item in payload.variant_ids if clean(item)]
+    if not variant_ids:
+        return {"ok": True, "ignored": 0}
+
+    products_by_id = {product_id(row): row for row in load_products()}
+    ignore_error = "Produit invisible - vérifier si volontaire"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ignored = 0
+    with connect() as conn:
+        for variant_id in variant_ids:
+            if variant_id not in products_by_id:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO approvals
+                (Internal_Variant_ID, Type, Erreur, Date)
+                VALUES (?, ?, ?, ?)
+                """,
+                (variant_id, "Catalogue", ignore_error, now),
+            )
+            ignored += 1
+    return {"ok": True, "ignored": ignored}
+
+
 @app.delete("/api/approvals")
 def api_remove_approval(payload: ApprovalPayload):
     with connect() as conn:
