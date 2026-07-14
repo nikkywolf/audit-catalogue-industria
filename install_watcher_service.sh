@@ -9,6 +9,7 @@ TARGET_PLIST="$TARGET_DIR/$PLIST_NAME"
 
 mkdir -p "$TARGET_DIR"
 mkdir -p "$PROJECT_DIR/logs"
+mkdir -p "$PROJECT_DIR/incoming_exports"
 
 launchctl bootout "gui/$(id -u)" "$TARGET_PLIST" 2>/dev/null || true
 cp "$SOURCE_PLIST" "$TARGET_PLIST"

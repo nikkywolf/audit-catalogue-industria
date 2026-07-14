@@ -4,16 +4,18 @@ import subprocess
 import shutil
 from datetime import datetime
 
-DOWNLOAD_FOLDERS = [
-    os.path.expanduser("~/Downloads/audit-catalogue-industria"),
-    os.path.expanduser("~/Downloads"),
-]
-
 PROJECT_FOLDER = os.path.expanduser(
     "~/industria-apps/audit-catalogue-industria"
 )
 
+INCOMING_EXPORTS_FOLDER = os.path.join(PROJECT_FOLDER, "incoming_exports")
 EXPORTS_FOLDER = os.path.join(PROJECT_FOLDER, "exports")
+
+DOWNLOAD_FOLDERS = [
+    INCOMING_EXPORTS_FOLDER,
+    os.path.expanduser("~/Downloads/audit-catalogue-industria"),
+    os.path.expanduser("~/Downloads"),
+]
 
 PROCESSED_FILE = os.path.join(
     PROJECT_FOLDER,
@@ -22,13 +24,19 @@ PROCESSED_FILE = os.path.join(
 
 CHECK_INTERVAL_SECONDS = 20
 DOWNLOAD_STABILITY_SECONDS = 8
+INACCESSIBLE_LOG_INTERVAL_SECONDS = 600
 
 os.makedirs(EXPORTS_FOLDER, exist_ok=True)
+os.makedirs(INCOMING_EXPORTS_FOLDER, exist_ok=True)
 for folder in DOWNLOAD_FOLDERS:
+    if folder.startswith(os.path.expanduser("~/Downloads")):
+        continue
     try:
         os.makedirs(folder, exist_ok=True)
     except OSError:
         pass
+
+last_inaccessible_log = {}
 
 def load_processed():
     if not os.path.exists(PROCESSED_FILE):
@@ -66,8 +74,9 @@ def log(message):
 
 def copy_export_to_repo(path, filename):
     destination = os.path.join(EXPORTS_FOLDER, filename)
-    if not os.path.exists(destination):
+    if os.path.abspath(path) != os.path.abspath(destination) and not os.path.exists(destination):
         shutil.copy2(path, destination)
+    return destination
 
 log("Surveillance des dossiers d'exports Lightspeed pour la v2...")
 for folder in DOWNLOAD_FOLDERS:
@@ -90,7 +99,10 @@ while True:
                 ]
                 zip_files.extend(folder_files)
             except OSError as e:
-                log(f"Dossier non accessible pour le watcher: {folder} ({e})")
+                now = time.time()
+                if now - last_inaccessible_log.get(folder, 0) >= INACCESSIBLE_LOG_INTERVAL_SECONDS:
+                    log(f"Dossier non accessible pour le watcher: {folder} ({e})")
+                    last_inaccessible_log[folder] = now
                 continue
 
         zip_files.sort()
@@ -110,11 +122,11 @@ while True:
 
             log("")
             log(f"Nouvel export détecté : {filename}")
-            copy_export_to_repo(full_path, filename)
+            audit_export_path = copy_export_to_repo(full_path, filename)
             log("Lancement de l'audit...")
 
             env = os.environ.copy()
-            env["AUDIT_EXPORT_FILE"] = full_path
+            env["AUDIT_EXPORT_FILE"] = audit_export_path
             result = subprocess.run(
                 ["/usr/bin/python3", "audit_catalogue.py"],
                 cwd=PROJECT_FOLDER,
