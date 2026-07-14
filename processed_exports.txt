@@ -7,3 +7,4 @@ products_export_2026-06-25_17-50-15.zip
 products_export_2026-06-26_18-45-31.zip
 products_export_2026-06-30_15-28-54.zip
 products_export_2026-07-03_13-33-25.zip
+products_export_2026-07-14_18-27-08.zip
