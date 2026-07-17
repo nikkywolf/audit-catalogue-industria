@@ -830,10 +830,18 @@ def ecom_product_context(product: dict[str, Any]) -> dict[str, Any]:
     brand = product.get("brand") or product.get("Brand")
     variants = product.get("variants") or product.get("Variants") or product.get("variant")
     images = product.get("images") or product.get("Images") or product.get("image")
+    categories = product.get("categories")
+    attributes = product.get("attributes")
+    metafields = product.get("metafields")
+    tags = product.get("tags")
     return {
         "brand": get_ecom_resource_record(brand, ("brand", "Brand")),
         "variants": get_ecom_resource_collection(variants, ("variants", "variant", "Variant")),
         "images": get_ecom_resource_collection(images, ("productImages", "productImage", "images", "image", "Image")),
+        "categories": get_ecom_resource_collection(categories, ("categoriesProducts", "categoriesProduct")),
+        "attributes": get_ecom_resource_collection(attributes, ("productAttributes", "productAttribute")),
+        "metafields": get_ecom_resource_collection(metafields, ("productMetafields", "productMetafield")),
+        "tags": get_ecom_resource_collection(tags, ("tagsProducts", "tagsProduct")),
     }
 
 
@@ -847,13 +855,64 @@ def image_url_from_ecom_image(image: dict[str, Any]) -> str:
     )
 
 
+def ecom_metafield_value(metafields: list[dict[str, Any]], *keys: str) -> str:
+    wanted = {key.lower() for key in keys}
+    for field in metafields:
+        key = clean(field.get("key")).lower()
+        if key in wanted:
+            return clean(field.get("value"))
+    return ""
+
+
+def ecom_category_titles(categories_products: list[dict[str, Any]]) -> list[str]:
+    titles: list[str] = []
+    for item in categories_products:
+        category = item.get("category")
+        record = get_ecom_resource_record(category, ("category", "Category"))
+        title = clean(record.get("title") or record.get("fulltitle") or record.get("name") or record.get("id"))
+        if title:
+            titles.append(title)
+    return titles
+
+
+def ecom_attribute_values(attributes: list[dict[str, Any]]) -> list[str]:
+    values: list[str] = []
+    for item in attributes:
+        parts = [
+            clean(item.get("title") or item.get("name") or item.get("key")),
+            clean(item.get("value") or item.get("valueTitle") or item.get("attributeValue")),
+        ]
+        text = ": ".join(part for part in parts if part)
+        if text:
+            values.append(text)
+    return values
+
+
+def ecom_tag_values(tags: list[dict[str, Any]]) -> list[str]:
+    values: list[str] = []
+    for item in tags:
+        tag = item.get("tag")
+        record = get_ecom_resource_record(tag, ("tag", "Tag")) if isinstance(tag, dict) else {}
+        text = clean(record.get("title") or record.get("name") or item.get("title") or item.get("name") or item.get("id"))
+        if text:
+            values.append(text)
+    return values
+
+
 def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) -> list[dict[str, str]]:
     product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
     brand = context.get("brand") or {}
     variants = context.get("variants") or [{}]
     images = context.get("images") or []
+    metafields = context.get("metafields") or []
+    category_titles = ecom_category_titles(context.get("categories") or [])
+    filter_values = ecom_attribute_values(context.get("attributes") or []) + ecom_tag_values(context.get("tags") or [])
     image_urls = [url for image in images if (url := image_url_from_ecom_image(image))]
     brand_value = clean(brand.get("title") or brand.get("name") or brand.get("id"))
+    meta_title_fc = ecom_metafield_value(metafields, "meta_title_fc", "meta_title_fr") or clean(product.get("title"))
+    meta_description_fc = ecom_metafield_value(metafields, "meta_description_fc", "meta_description_fr")
+    meta_keywords_fc = ecom_metafield_value(metafields, "meta_keywords_fc", "meta_keywords_fr")
+    google_category_fc = ecom_metafield_value(metafields, "google_product_category_fc", "google_product_category_fr")
     rows: list[dict[str, str]] = []
     for variant in variants:
         variant_id = clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")) or product_id_value
@@ -874,8 +933,12 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
                 "US_Description_Short": "",
                 "US_Description_Long": "",
                 "URL": clean(product.get("url")),
-                "Meta_Title": clean(product.get("metaTitle") or product.get("title")),
-                "Meta_Description": clean(product.get("metaDescription")),
+                "FC_Meta_Title": meta_title_fc,
+                "FC_Meta_Description": meta_description_fc,
+                "FC_Meta_Keywords": meta_keywords_fc,
+                "FC_Google_Category": google_category_fc,
+                "Categories": " | ".join(category_titles),
+                "Filtres": " | ".join(filter_values),
                 "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
             }
         )
@@ -914,8 +977,12 @@ ECOM_AUDIT_MAPPING_SOURCES = {
     "US_Description_Short": "à confirmer: autre langue/API",
     "US_Description_Long": "à confirmer: autre langue/API",
     "URL": "product.url",
-    "Meta_Title": "product.metaTitle/title",
-    "Meta_Description": "product.metaDescription",
+    "FC_Meta_Title": "productMetafields meta_title_fc/fr ou product.title",
+    "FC_Meta_Description": "productMetafields meta_description_fc/fr",
+    "FC_Meta_Keywords": "productMetafields meta_keywords_fc/fr",
+    "FC_Google_Category": "productMetafields google_product_category_fc/fr",
+    "Categories": "categoriesProducts -> category.link -> category.title",
+    "Filtres": "productAttributes + tagsProducts",
     "Updated_At": "product.updatedAt",
 }
 
@@ -2292,6 +2359,11 @@ def catalogue_ecom_map_test_page(x_remote_user: Optional[str] = Header(default=N
         "Images",
         "FC_Description_Short",
         "FC_Description_Long",
+        "FC_Meta_Title",
+        "FC_Meta_Description",
+        "FC_Meta_Keywords",
+        "FC_Google_Category",
+        "Categories",
     }
     for product in products:
         context = ecom_product_context(product)
@@ -2325,6 +2397,12 @@ def catalogue_ecom_map_test_page(x_remote_user: Optional[str] = Header(default=N
         "Images",
         "FC_Description_Short",
         "FC_Description_Long",
+        "FC_Meta_Title",
+        "FC_Meta_Description",
+        "FC_Meta_Keywords",
+        "FC_Google_Category",
+        "Categories",
+        "Filtres",
     ]
     candidate_html_rows = "".join(
         "<tr>" + "".join(f"<td>{html.escape(clean(row.get(field))[:180])}</td>" for field in candidate_fields) + "</tr>"
