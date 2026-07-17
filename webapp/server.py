@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import json
 import hashlib
+import html
 import os
 import re
 import sqlite3
 import subprocess
+import secrets
 import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.request import Request as UrlRequest, urlopen
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -67,6 +71,32 @@ def load_dotenv() -> None:
 
 
 load_dotenv()
+
+
+def update_dotenv(values: dict[str, str]) -> None:
+    env_path = PROJECT_DIR / ".env"
+    existing_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    remaining = dict(values)
+    output_lines = []
+
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            output_lines.append(line)
+            continue
+
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            output_lines.append(f"{key}={remaining.pop(key)}")
+        else:
+            output_lines.append(line)
+
+    for key, value in remaining.items():
+        output_lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(output_lines).rstrip() + "\n", encoding="utf-8")
+    for key, value in values.items():
+        os.environ[key] = value
 
 
 class ApprovalPayload(BaseModel):
@@ -195,6 +225,77 @@ def require_admin(x_remote_user: Optional[str]) -> dict[str, str]:
 
 def require_user(x_remote_user: Optional[str]) -> dict[str, str]:
     return current_user(x_remote_user)
+
+
+def lightspeed_retail_config() -> dict[str, str]:
+    return {
+        "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", ""),
+        "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", ""),
+        "redirect_uri": os.environ.get(
+            "LIGHTSPEED_REDIRECT_URI",
+            "https://dashboardindustria.com/lightspeed/callback",
+        ),
+        "scope": os.environ.get("LIGHTSPEED_SCOPE", "products:read offline_access"),
+    }
+
+
+def lightspeed_retail_connected() -> bool:
+    return all(
+        os.environ.get(key)
+        for key in (
+            "LIGHTSPEED_RETAIL_ACCESS_TOKEN",
+            "LIGHTSPEED_RETAIL_REFRESH_TOKEN",
+            "LIGHTSPEED_RETAIL_DOMAIN_PREFIX",
+        )
+    )
+
+
+def lightspeed_retail_auth_url() -> str:
+    config = lightspeed_retail_config()
+    if not config["client_id"] or not config["client_secret"] or not config["redirect_uri"]:
+        raise HTTPException(status_code=400, detail="Configuration Lightspeed Retail incomplète")
+
+    state = secrets.token_urlsafe(24)
+    update_dotenv({"LIGHTSPEED_OAUTH_STATE": state})
+    return "https://secure.retail.lightspeed.app/connect?" + urlencode(
+        {
+            "response_type": "code",
+            "client_id": config["client_id"],
+            "redirect_uri": config["redirect_uri"],
+            "state": state,
+            "scope": config["scope"],
+        }
+    )
+
+
+def exchange_lightspeed_retail_code(code: str, domain_prefix: str) -> dict[str, Any]:
+    config = lightspeed_retail_config()
+    token_url = f"https://{domain_prefix}.retail.lightspeed.app/api/1.0/token"
+    body = urlencode(
+        {
+            "code": code,
+            "client_id": config["client_id"],
+            "client_secret": config["client_secret"],
+            "grant_type": "authorization_code",
+            "redirect_uri": config["redirect_uri"],
+        }
+    ).encode("utf-8")
+    request = UrlRequest(
+        token_url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "IndustriaCatalogueAudit/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise HTTPException(status_code=502, detail=f"Lightspeed a refusé le jeton: {detail}") from exc
 
 
 def clean(value: Any) -> str:
@@ -912,6 +1013,96 @@ def index() -> FileResponse:
 @app.get("/api/me")
 def api_me(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
     return current_user(x_remote_user)
+
+
+@app.get("/api/integrations")
+def api_integrations(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    retail_config = lightspeed_retail_config()
+    retail_missing = [
+        label
+        for label, value in (
+            ("LIGHTSPEED_CLIENT_ID", retail_config["client_id"]),
+            ("LIGHTSPEED_CLIENT_SECRET", retail_config["client_secret"]),
+            ("LIGHTSPEED_REDIRECT_URI", retail_config["redirect_uri"]),
+        )
+        if not value
+    ]
+    ecom_connected = bool(
+        os.environ.get("LIGHTSPEED_API_TOKEN")
+        or (os.environ.get("LIGHTSPEED_API_KEY") and os.environ.get("LIGHTSPEED_API_SECRET"))
+    )
+    return {
+        "items": [
+            {
+                "id": "lightspeed_retail",
+                "name": "Lightspeed Retail",
+                "connected": lightspeed_retail_connected(),
+                "configured": not retail_missing,
+                "missing": retail_missing,
+                "domain_prefix": os.environ.get("LIGHTSPEED_RETAIL_DOMAIN_PREFIX", ""),
+                "scope": os.environ.get("LIGHTSPEED_RETAIL_SCOPE", ""),
+                "expires": os.environ.get("LIGHTSPEED_RETAIL_EXPIRES", ""),
+                "connect_url": "/lightspeed/connect",
+            },
+            {
+                "id": "lightspeed_ecom",
+                "name": "Lightspeed eCom",
+                "connected": ecom_connected,
+                "configured": ecom_connected,
+                "missing": [],
+            },
+            {"id": "google_merchant", "name": "Google Merchant Center", "connected": False, "configured": False, "missing": []},
+            {"id": "google_ads", "name": "Google Ads", "connected": False, "configured": False, "missing": []},
+        ]
+    }
+
+
+@app.get("/lightspeed/connect")
+def lightspeed_connect(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    return RedirectResponse(lightspeed_retail_auth_url())
+
+
+@app.get("/lightspeed/callback")
+def lightspeed_callback(
+    code: str = "",
+    domain_prefix: str = "",
+    state: str = "",
+    error: str = "",
+):
+    if error:
+        return HTMLResponse(f"<h1>Connexion Lightspeed annulée</h1><p>{html.escape(error)}</p>", status_code=400)
+    if not code or not domain_prefix:
+        return HTMLResponse("<h1>Connexion Lightspeed incomplète</h1><p>Code ou domaine manquant.</p>", status_code=400)
+    expected_state = os.environ.get("LIGHTSPEED_OAUTH_STATE", "")
+    if not expected_state or state != expected_state:
+        return HTMLResponse("<h1>Connexion Lightspeed refusée</h1><p>Validation de sécurité invalide.</p>", status_code=400)
+
+    token = exchange_lightspeed_retail_code(code, domain_prefix)
+    update_dotenv(
+        {
+            "LIGHTSPEED_RETAIL_ACCESS_TOKEN": str(token.get("access_token", "")),
+            "LIGHTSPEED_RETAIL_REFRESH_TOKEN": str(token.get("refresh_token", "")),
+            "LIGHTSPEED_RETAIL_DOMAIN_PREFIX": str(token.get("domain_prefix") or domain_prefix),
+            "LIGHTSPEED_RETAIL_SCOPE": str(token.get("scope", "")),
+            "LIGHTSPEED_RETAIL_EXPIRES": str(token.get("expires", "")),
+            "LIGHTSPEED_OAUTH_STATE": "",
+        }
+    )
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html lang="fr">
+          <head><meta charset="utf-8"><title>Lightspeed connecté</title></head>
+          <body style="font-family: system-ui; padding: 32px;">
+            <h1>Lightspeed Retail est connecté.</h1>
+            <p>Tu peux retourner au Catalogue Audit.</p>
+            <p><a href="/">Retour au dashboard</a></p>
+          </body>
+        </html>
+        """
+    )
 
 
 @app.get("/api/bootstrap")

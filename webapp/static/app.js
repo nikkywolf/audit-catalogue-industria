@@ -70,6 +70,8 @@ async function loadPageData(pageId, force = false) {
     await loadTodos();
   } else if (pageId === "admin") {
     await loadBrandsAdmin();
+  } else if (pageId === "integrations" && isAdmin()) {
+    await loadIntegrations();
   } else if (pageId === "gptBatch" && canUseGpt()) {
     await loadGptBatchPage();
   }
@@ -724,6 +726,36 @@ async function loadGptBatchPage() {
   await loadBatchApproved();
 }
 
+async function loadIntegrations() {
+  const data = await api("/api/integrations");
+  $("#integrationsList").innerHTML = data.items.map((item) => {
+    const statusText = item.connected ? "Connecté" : item.configured ? "Non connecté" : "Configuration manquante";
+    const statusClass = item.connected ? "ok" : "warning";
+    const missing = item.missing && item.missing.length
+      ? `<div class="muted">À ajouter dans .env : ${escapeHtml(item.missing.join(", "))}</div>`
+      : "";
+    const details = [
+      item.domain_prefix ? `Boutique : ${item.domain_prefix}` : "",
+      item.scope ? `Accès : ${item.scope}` : "",
+      item.expires ? `Expiration : ${item.expires}` : "",
+    ].filter(Boolean).map((text) => `<div class="muted">${escapeHtml(text)}</div>`).join("");
+    const action = item.id === "lightspeed_retail" && item.configured
+      ? `<a class="button-link" href="${escapeHtml(item.connect_url)}">Connecter mon compte</a>`
+      : "";
+    return `
+      <div class="integration-card">
+        <div>
+          <h3>${escapeHtml(item.name)}</h3>
+          <div class="integration-status ${statusClass}">${item.connected ? "✓" : "✕"} ${escapeHtml(statusText)}</div>
+          ${missing}
+          ${details}
+        </div>
+        <div>${action}</div>
+      </div>
+    `;
+  }).join("");
+}
+
 async function setup() {
   document.querySelectorAll(".nav").forEach((button) => {
     button.addEventListener("click", () => setPage(button.dataset.page));
@@ -754,6 +786,7 @@ async function setup() {
   $("#brandAdminSearch").addEventListener("input", () => {
     reloadBrands();
   });
+  $("#refreshIntegrations").addEventListener("click", () => loadIntegrations());
 
   if (canUseGpt()) {
     const reloadBatchCandidates = debounce(() => loadBatchCandidates());

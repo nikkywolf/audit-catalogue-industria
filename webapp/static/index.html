@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Industria Audit</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260630-1305" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260717-1015" />
   </head>
   <body>
     <aside class="sidebar">
@@ -16,6 +16,7 @@
         <button class="nav" data-page="errors">Erreurs</button>
         <button class="nav" data-page="gptBatch">Batch GPT</button>
         <button class="nav" data-page="todos">To-Do List</button>
+        <button class="nav admin-only" data-page="integrations">Intégrations</button>
         <button class="nav" data-page="admin">Admin</button>
       </nav>
       <a class="logout" href="https://dashboardindustria.com/logout">Déconnexion</a>
@@ -145,6 +146,19 @@
         </section>
       </section>
 
+      <section id="integrations" class="page admin-only">
+        <div class="page-title">
+          <h2>Intégrations</h2>
+        </div>
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Connexions</h3>
+            <button id="refreshIntegrations">Rafraîchir</button>
+          </div>
+          <div id="integrationsList" class="integrations-list"></div>
+        </section>
+      </section>
+
       <section id="admin" class="page">
         <div class="page-title">
           <h2>Admin</h2>
@@ -168,6 +182,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260630-1305"></script>
+    <script src="/static/app.js?v=20260717-1015"></script>
   </body>
 </html>
