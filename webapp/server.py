@@ -14,7 +14,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 import uuid
@@ -354,10 +354,10 @@ LIGHTSPEED_RSERIES_TOKEN_URL = "https://cloud.lightspeedapp.com/auth/oauth/token
 
 def lightspeed_retail_config() -> dict[str, str]:
     return {
-        "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", ""),
-        "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", ""),
-        "redirect_uri": os.environ.get("LIGHTSPEED_REDIRECT_URI", ""),
-        "scope": os.environ.get("LIGHTSPEED_SCOPE", "item:read inventory:read"),
+        "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", "").strip(),
+        "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", "").strip(),
+        "redirect_uri": os.environ.get("LIGHTSPEED_REDIRECT_URI", "").strip(),
+        "scope": "employee:inventory_read",
     }
 
 
@@ -373,15 +373,18 @@ def lightspeed_retail_auth_url() -> str:
 
     state = secrets.token_urlsafe(24)
     save_oauth_state(LIGHTSPEED_RSERIES_PROVIDER, state)
-    return LIGHTSPEED_RSERIES_AUTHORIZE_URL + "?" + urlencode(
-        {
-            "response_type": "code",
-            "client_id": config["client_id"],
-            "redirect_uri": config["redirect_uri"],
-            "state": state,
-            "scope": config["scope"],
-        }
-    )
+    params = {
+        "response_type": "code",
+        "client_id": config["client_id"],
+        "scope": config["scope"],
+        "state": state,
+    }
+    parts = urlsplit(LIGHTSPEED_RSERIES_AUTHORIZE_URL)
+    auth_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+    masked_params = {**params, "client_id": "***", "state": "***"}
+    masked_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(masked_params), parts.fragment))
+    logger.info("Lightspeed R-Series authorization URL generated: %s", masked_url)
+    return auth_url
 
 
 def encode_multipart_form_data(fields: dict[str, str]) -> tuple[bytes, str]:
