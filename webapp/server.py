@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import html
@@ -352,6 +353,7 @@ LIGHTSPEED_RSERIES_AUTHORIZE_URL = "https://cloud.lightspeedapp.com/auth/oauth/a
 LIGHTSPEED_RSERIES_TOKEN_URL = "https://cloud.lightspeedapp.com/auth/oauth/token"
 LIGHTSPEED_RSERIES_REDIRECT_URI = "https://dashboardindustria.com/lightspeed/callback"
 SENSITIVE_OAUTH_FIELDS = ("client_secret", "access_token", "refresh_token", "code")
+SENSITIVE_ECOM_FIELDS = ("LIGHTSPEED_ECOM_API_SECRET", "api_secret", "secret", "password")
 
 
 class LightspeedTokenExchangeError(Exception):
@@ -379,6 +381,24 @@ def mask_sensitive_text(text: str) -> str:
             flags=re.IGNORECASE,
         )
     return masked[:1000]
+
+
+def mask_sensitive_text_full(text: str) -> str:
+    masked = text
+    for field in (*SENSITIVE_OAUTH_FIELDS, *SENSITIVE_ECOM_FIELDS):
+        masked = re.sub(
+            rf'("{field}"\s*:\s*")[^"]+(")',
+            rf'\1***\2',
+            masked,
+            flags=re.IGNORECASE,
+        )
+        masked = re.sub(
+            rf"({field}=)[^&\s]+",
+            rf"\1***",
+            masked,
+            flags=re.IGNORECASE,
+        )
+    return masked
 
 
 def normalize_lightspeed_redirect_uri(value: str) -> str:
@@ -579,6 +599,167 @@ def lightspeed_rseries_get_raw(path: str, params: Optional[dict[str, Any]] = Non
                 "body": body,
             },
         ) from exc
+
+
+def lightspeed_ecom_config() -> dict[str, str]:
+    api_key = os.environ.get("LIGHTSPEED_ECOM_API_KEY", "").strip()
+    api_secret = os.environ.get("LIGHTSPEED_ECOM_API_SECRET", "").strip()
+    base_url = (
+        os.environ.get("LIGHTSPEED_ECOM_API_BASE_URL")
+        or os.environ.get("LIGHTSPEED_API_BASE_URL")
+        or "https://api.shoplightspeed.com"
+    ).strip().rstrip("/")
+    language = (
+        os.environ.get("LIGHTSPEED_ECOM_LANGUAGE")
+        or os.environ.get("LIGHTSPEED_API_LANGUAGE")
+        or ""
+    ).strip().strip("/")
+
+    missing = []
+    if not api_key:
+        missing.append("LIGHTSPEED_ECOM_API_KEY")
+    if not api_secret:
+        missing.append("LIGHTSPEED_ECOM_API_SECRET")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Configuration Lightspeed eCom manquante.",
+                "missing": missing,
+            },
+        )
+
+    language = language or "fc"
+    if base_url.endswith(f"/{language}"):
+        products_endpoint = "/products.json"
+    else:
+        products_endpoint = f"/{language}/products.json"
+
+    return {
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "base_url": base_url,
+        "products_endpoint": products_endpoint,
+    }
+
+
+def lightspeed_ecom_candidate_endpoints() -> list[str]:
+    config = lightspeed_ecom_config()
+    configured = config["products_endpoint"]
+    candidates = [configured]
+    for language in ("fc", "fr", "en"):
+        endpoint = f"/{language}/products.json"
+        if endpoint not in candidates:
+            candidates.append(endpoint)
+    return candidates
+
+
+def lightspeed_ecom_get_raw(endpoint: str, params: Optional[dict[str, Any]] = None) -> tuple[str, str]:
+    config = lightspeed_ecom_config()
+    endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    query = f"?{urlencode(params or {})}" if params else ""
+    url = f"{config['base_url']}{endpoint}{query}"
+    credentials = f"{config['api_key']}:{config['api_secret']}".encode("utf-8")
+    request = UrlRequest(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Basic " + base64.b64encode(credentials).decode("ascii"),
+            "User-Agent": "IndustriaCatalogueAudit/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            return url, response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = mask_sensitive_text_full(exc.read().decode("utf-8", errors="replace"))
+        safe_url = re.sub(r"([?&](?:key|secret|api_key|api_secret)=)[^&]+", r"\1***", url, flags=re.IGNORECASE)
+        logger.warning("Lightspeed eCom API GET failed: endpoint=%s status=%s body=%s", endpoint, exc.code, body[:1000])
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Lightspeed eCom a refusé la requête.",
+                "endpoint": safe_url,
+                "status": exc.code,
+                "body": body[:2000],
+            },
+        ) from exc
+
+
+def lightspeed_ecom_get_products_test_raw() -> tuple[str, str]:
+    last_error: HTTPException | None = None
+    for endpoint in lightspeed_ecom_candidate_endpoints():
+        try:
+            return lightspeed_ecom_get_raw(endpoint, {"limit": 10, "offset": 0})
+        except HTTPException as exc:
+            last_error = exc
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            body = str(detail.get("body", ""))
+            if "Unknown or inactive language" not in body:
+                raise
+    if last_error:
+        raise last_error
+    raise HTTPException(status_code=502, detail="Aucun endpoint eCom testé.")
+
+
+def extract_ecom_products(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        for key in ("products", "Product", "items", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = value.get("product") or value.get("item") or value.get("data")
+                if isinstance(nested, list):
+                    return [item for item in nested if isinstance(item, dict)]
+                return [value]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def nested_count(value: Any, child_key: str = "") -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        if child_key and isinstance(value.get(child_key), list):
+            return len(value[child_key])
+        for nested in value.values():
+            if isinstance(nested, list):
+                return len(nested)
+    return 0
+
+
+def first_nested_dict(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if isinstance(value, dict):
+        for key in keys:
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                return nested
+        return value
+    return {}
+
+
+def simplify_ecom_product(product: dict[str, Any]) -> dict[str, Any]:
+    brand = product.get("brand") or product.get("Brand")
+    brand_dict = first_nested_dict(brand, ("brand", "Brand"))
+    variants = product.get("variants") or product.get("Variants") or product.get("variant")
+    images = product.get("images") or product.get("Images") or product.get("image")
+    variant_dict = first_nested_dict(variants, ("variant", "Variant"))
+    return {
+        "product_id": clean(product.get("id") or product.get("productID") or product.get("product_id")),
+        "title": clean(product.get("title") or product.get("fulltitle") or product.get("name")),
+        "visibility": clean(product.get("isVisible") or product.get("visible") or product.get("visibility")),
+        "brand": clean(brand_dict.get("title") or brand_dict.get("name") or brand_dict.get("id") or brand),
+        "url": clean(product.get("url") or product.get("urlPath") or product.get("fullUrl")),
+        "price": clean(product.get("priceIncl") or product.get("priceExcl") or product.get("price") or variant_dict.get("priceIncl") or variant_dict.get("price")),
+        "sku": clean(product.get("sku") or product.get("articleCode") or variant_dict.get("sku") or variant_dict.get("articleCode")),
+        "ean_upc": clean(product.get("ean") or product.get("upc") or product.get("ean13") or variant_dict.get("ean") or variant_dict.get("upc")),
+        "variants_count": nested_count(variants, "variant"),
+        "images_count": nested_count(images, "image"),
+        "updated_at": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
+    }
 
 
 def as_list(value: Any) -> list[Any]:
@@ -1856,6 +2037,72 @@ def lightspeed_item_raw_page(
         content=mask_sensitive_text(raw_body),
         media_type="application/json; charset=utf-8",
     )
+
+
+@app.get("/catalogue/ecom-test")
+def catalogue_ecom_test_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    try:
+        url, raw_body = lightspeed_ecom_get_products_test_raw()
+        payload = json.loads(raw_body)
+        products = extract_ecom_products(payload)[:10]
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom C-Series - Test catalogue", api_error_html(exc))
+    except json.JSONDecodeError as exc:
+        return diagnostic_page(
+            "Lightspeed eCom C-Series - Test catalogue",
+            f"""
+            <div class="error">Réponse eCom non JSON: {html.escape(str(exc))}</div>
+            <h2>Réponse brute</h2>
+            <pre style="white-space: pre-wrap;">{html.escape(mask_sensitive_text_full(raw_body))}</pre>
+            """,
+        )
+
+    simplified = [simplify_ecom_product(product) for product in products]
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(row["product_id"])}</td>
+          <td>{html.escape(row["title"])}</td>
+          <td>{html.escape(row["visibility"])}</td>
+          <td>{html.escape(row["brand"])}</td>
+          <td>{html.escape(row["url"])}</td>
+          <td>{html.escape(row["price"])}</td>
+          <td>{html.escape(row["sku"])}</td>
+          <td>{html.escape(row["ean_upc"])}</td>
+          <td>{row["variants_count"]}</td>
+          <td>{row["images_count"]}</td>
+          <td>{html.escape(row["updated_at"])}</td>
+        </tr>
+        """
+        for row in simplified
+    ) or '<tr><td colspan="11" class="muted">Aucun produit retourné par Lightspeed eCom.</td></tr>'
+    body = f"""
+      <p class="muted">Diagnostic eCom en lecture seule. Aucun changement local, aucun envoi vers Lightspeed.</p>
+      <p class="muted">Endpoint appelé : {html.escape(url)}</p>
+      <h2>Version simplifiée</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>product ID</th>
+            <th>titre</th>
+            <th>visibilité</th>
+            <th>marque</th>
+            <th>URL</th>
+            <th>prix</th>
+            <th>SKU</th>
+            <th>EAN/UPC</th>
+            <th>variantes</th>
+            <th>images</th>
+            <th>modifié</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <h2>Réponse brute</h2>
+      <pre style="white-space: pre-wrap;">{html.escape(mask_sensitive_text_full(raw_body))}</pre>
+    """
+    return diagnostic_page("Lightspeed eCom C-Series - Test catalogue", body)
 
 
 @app.get("/api/bootstrap")
