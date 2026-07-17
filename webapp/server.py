@@ -350,6 +350,7 @@ def require_user(x_remote_user: Optional[str]) -> dict[str, str]:
 LIGHTSPEED_RSERIES_PROVIDER = "lightspeed_rseries"
 LIGHTSPEED_RSERIES_AUTHORIZE_URL = "https://cloud.lightspeedapp.com/auth/oauth/authorize"
 LIGHTSPEED_RSERIES_TOKEN_URL = "https://cloud.lightspeedapp.com/auth/oauth/token"
+LIGHTSPEED_RSERIES_REDIRECT_URI = "https://dashboardindustria.com/lightspeed/callback"
 SENSITIVE_OAUTH_FIELDS = ("client_secret", "access_token", "refresh_token", "code")
 
 
@@ -380,11 +381,28 @@ def mask_sensitive_text(text: str) -> str:
     return masked[:1000]
 
 
+def normalize_lightspeed_redirect_uri(value: str) -> str:
+    cleaned = value.strip().strip('"').strip("'").strip()
+    if cleaned.endswith("/"):
+        cleaned = cleaned.rstrip("/")
+    return cleaned
+
+
 def lightspeed_retail_config() -> dict[str, str]:
+    redirect_uri = normalize_lightspeed_redirect_uri(os.environ.get("LIGHTSPEED_REDIRECT_URI", ""))
+    if redirect_uri != LIGHTSPEED_RSERIES_REDIRECT_URI:
+        logger.warning(
+            "LIGHTSPEED_REDIRECT_URI normalized mismatch; using required callback. configured_repr=%r configured_length=%s required_length=%s",
+            redirect_uri,
+            len(redirect_uri),
+            len(LIGHTSPEED_RSERIES_REDIRECT_URI),
+        )
+        redirect_uri = LIGHTSPEED_RSERIES_REDIRECT_URI
+    logger.info("Lightspeed R-Series redirect_uri repr=%r length=%s", redirect_uri, len(redirect_uri))
     return {
         "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", "").strip(),
         "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", "").strip(),
-        "redirect_uri": os.environ.get("LIGHTSPEED_REDIRECT_URI", "").strip(),
+        "redirect_uri": redirect_uri,
         "scope": "employee:register employee:inventory",
     }
 
@@ -404,6 +422,7 @@ def lightspeed_retail_auth_url() -> str:
     params = {
         "response_type": "code",
         "client_id": config["client_id"],
+        "redirect_uri": config["redirect_uri"],
         "scope": config["scope"],
         "state": state,
     }
@@ -414,20 +433,6 @@ def lightspeed_retail_auth_url() -> str:
     logger.info("Lightspeed R-Series authorization URL generated: %s", masked_url)
     return auth_url
 
-
-def encode_multipart_form_data(fields: dict[str, str]) -> tuple[bytes, str]:
-    boundary = "----IndustriaOAuth" + secrets.token_hex(16)
-    chunks = []
-    for key, value in fields.items():
-        chunks.append(f"--{boundary}")
-        chunks.append(f'Content-Disposition: form-data; name="{key}"')
-        chunks.append("")
-        chunks.append(str(value))
-    chunks.append(f"--{boundary}--")
-    chunks.append("")
-    return "\r\n".join(chunks).encode("utf-8"), f"multipart/form-data; boundary={boundary}"
-
-
 def request_lightspeed_retail_token(payload: dict[str, str]) -> dict[str, Any]:
     config = lightspeed_retail_config()
     fields = {
@@ -435,13 +440,13 @@ def request_lightspeed_retail_token(payload: dict[str, str]) -> dict[str, Any]:
         "client_secret": config["client_secret"],
         **payload,
     }
-    body, content_type = encode_multipart_form_data(fields)
+    body = urlencode(fields).encode("utf-8")
     request = UrlRequest(
         LIGHTSPEED_RSERIES_TOKEN_URL,
         data=body,
         headers={
             "Accept": "application/json",
-            "Content-Type": content_type,
+            "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "IndustriaCatalogueAudit/1.0",
         },
         method="POST",
