@@ -121,6 +121,31 @@ async function loadBootstrap() {
   renderBrandSummary(data.brand_summary);
 }
 
+async function runEcomSyncMissing() {
+  const button = $("#ecomSyncButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Synchronisation...";
+  $("#syncBox").textContent = "Recherche des nouveaux produits eCom...";
+  try {
+    const result = await api("/api/ecom/sync-missing", {
+      method: "POST",
+      body: JSON.stringify({ limit: 100 }),
+    });
+    window.alert(result.message || "Synchronisation terminée.");
+    state.loadedPages.delete("overview");
+    state.loadedPages.delete("errors");
+    await loadBootstrap();
+    const activePage = document.querySelector(".page.active");
+    if (activePage) {
+      await loadPageData(activePage.id, true);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 function isAdmin() {
   return state.me && state.me.role === "admin";
 }
@@ -796,6 +821,10 @@ async function setup() {
     reloadBrands();
   });
   $("#refreshIntegrations").addEventListener("click", () => loadIntegrations());
+  $("#ecomSyncButton").addEventListener("click", () => runEcomSyncMissing().catch((error) => {
+    window.alert(error.message || "La synchronisation a échoué.");
+    loadBootstrap();
+  }));
 
   if (canUseGpt()) {
     const reloadBatchCandidates = debounce(() => loadBatchCandidates());

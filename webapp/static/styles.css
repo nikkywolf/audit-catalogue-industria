@@ -98,7 +98,8 @@ button:hover {
   border-color: var(--accent);
 }
 
-.nav {
+.nav,
+.sync-menu {
   text-align: left;
 }
 

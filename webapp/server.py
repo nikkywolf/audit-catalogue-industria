@@ -2934,6 +2934,18 @@ async def catalogue_ecom_api_sync_submit(
     return diagnostic_page("Lightspeed eCom API - Recherche terminée", body)
 
 
+@app.post("/api/ecom/sync-missing")
+async def api_ecom_sync_missing(
+    payload: Optional[dict[str, Any]] = None,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    limit = 100
+    if isinstance(payload, dict):
+        limit = int(clean(payload.get("limit")) or 100)
+    return sync_ecom_api_products(limit)
+
+
 @app.post("/catalogue/ecom-api-enrich")
 async def catalogue_ecom_api_enrich_submit(
     request: Request,
