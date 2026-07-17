@@ -563,6 +563,11 @@ def extract_collection(payload: dict[str, Any], key: str) -> list[dict[str, Any]
     return [item for item in as_list(value) if isinstance(item, dict)]
 
 
+def extract_first_record(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    records = extract_collection(payload, key)
+    return records[0] if records else {}
+
+
 def resolve_lightspeed_account_id() -> str:
     token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
     if token and token["account_id"]:
@@ -609,6 +614,22 @@ def get_lightspeed_shops() -> list[dict[str, str]]:
     return [normalize_shop(row) for row in extract_collection(payload, "Shop")]
 
 
+def normalize_price_level(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "priceLevelID": clean(row.get("priceLevelID") or row.get("id")),
+        "name": clean(row.get("name")),
+        "archived": clean(row.get("archived")),
+        "type": clean(row.get("type")),
+        "Calculation": clean(row.get("Calculation") or row.get("calculation")),
+    }
+
+
+def get_lightspeed_price_levels() -> list[dict[str, str]]:
+    account_id = resolve_lightspeed_account_id()
+    payload = lightspeed_rseries_get(f"/Account/{account_id}/PriceLevel.json")
+    return [normalize_price_level(row) for row in extract_collection(payload, "PriceLevel")]
+
+
 def simplify_item_price_rows(item: dict[str, Any]) -> list[dict[str, str]]:
     item_prices = item.get("ItemPrices") or {}
     rows = item_prices.get("ItemPrice") if isinstance(item_prices, dict) else item_prices
@@ -616,6 +637,7 @@ def simplify_item_price_rows(item: dict[str, Any]) -> list[dict[str, str]]:
         {
             "amount": clean(row.get("amount")),
             "useType": clean(row.get("useType")),
+            "useTypeID": clean(row.get("useTypeID")),
         }
         for row in as_list(rows)
         if isinstance(row, dict)
@@ -675,6 +697,24 @@ def get_lightspeed_items_with_inventory_relations(limit: int = 10) -> list[dict[
     )
     items = extract_collection(payload, "Item")[:10]
     return [summarize_related_item(item) for item in items]
+
+
+def find_lightspeed_item_id_by_upc(upc: str) -> str:
+    account_id = resolve_lightspeed_account_id()
+    payload = lightspeed_rseries_get(
+        f"/Account/{account_id}/Item.json",
+        params={"upc": upc, "limit": 1},
+    )
+    item = extract_first_record(payload, "Item")
+    return clean(item.get("itemID"))
+
+
+def get_lightspeed_item_detail(item_id: str) -> dict[str, Any]:
+    account_id = resolve_lightspeed_account_id()
+    return lightspeed_rseries_get(
+        f"/Account/{account_id}/Item/{item_id}.json",
+        params={"load_relations": json.dumps(["ItemPrices", "ItemShops"])},
+    )
 
 
 def clean(value: Any) -> str:
@@ -1606,14 +1646,47 @@ def lightspeed_stores_page(x_remote_user: Optional[str] = Header(default=None, a
     return diagnostic_page("Lightspeed R-Series - Succursales", body)
 
 
+@app.get("/lightspeed/price-levels")
+def lightspeed_price_levels_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    try:
+        price_levels = get_lightspeed_price_levels()
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed R-Series - Niveaux de prix", api_error_html(exc))
+
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(row["priceLevelID"])}</td>
+          <td>{html.escape(row["name"])}</td>
+          <td>{html.escape(row["archived"])}</td>
+          <td>{html.escape(row["type"])}</td>
+          <td>{html.escape(row["Calculation"])}</td>
+        </tr>
+        """
+        for row in price_levels
+    ) or '<tr><td colspan="5" class="muted">Aucun niveau de prix retourné par Lightspeed.</td></tr>'
+    body = f"""
+      <p class="muted">Diagnostic lecture seule. Aucun envoi à Google, aucune écriture Lightspeed.</p>
+      <p><a href="/lightspeed/stores">Succursales</a> | <a href="/lightspeed/items-test">Test inventaire</a></p>
+      <table>
+        <thead>
+          <tr><th>priceLevelID</th><th>name</th><th>archived</th><th>type</th><th>Calculation</th></tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    """
+    return diagnostic_page("Lightspeed R-Series - Niveaux de prix", body)
+
+
 @app.get("/lightspeed/items-test")
 def lightspeed_items_test_page(
     shop_id: str = "",
+    item_id: str = "",
+    upc: str = "",
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
     require_admin(x_remote_user)
-    if not shop_id:
-        return diagnostic_page("Lightspeed R-Series - Test inventaire", '<div class="error">shop_id manquant.</div>')
     try:
         simple_items = get_lightspeed_simple_items(limit=10)
     except HTTPException as exc:
@@ -1654,9 +1727,55 @@ def lightspeed_items_test_page(
         for item in related_items
     ) or '<tr><td colspan="5" class="muted">Relations non retournées ou aucun article.</td></tr>'
 
+    detail_html = ""
+    search_value = clean(item_id) or clean(upc)
+    if search_value:
+        try:
+            resolved_item_id = clean(item_id)
+            if not resolved_item_id and upc:
+                resolved_item_id = find_lightspeed_item_id_by_upc(clean(upc))
+            if not resolved_item_id:
+                raise HTTPException(status_code=404, detail=f"Aucun item trouvé pour UPC {upc}.")
+            raw_payload = get_lightspeed_item_detail(resolved_item_id)
+            raw_item = extract_first_record(raw_payload, "Item")
+            item_prices = simplify_item_price_rows(raw_item)
+            item_shops = simplify_item_shop_rows(raw_item)
+            price_rows = "".join(
+                f"<tr><td>{html.escape(row['amount'])}</td><td>{html.escape(row['useType'])}</td><td>{html.escape(row['useTypeID'])}</td></tr>"
+                for row in item_prices
+            ) or '<tr><td colspan="3" class="muted">Aucun ItemPrices retourné.</td></tr>'
+            shop_rows = "".join(
+                f"<tr><td>{html.escape(row['shopID'])}</td><td>{html.escape(row['qoh'])}</td><td>{html.escape(row['sellable'])}</td></tr>"
+                for row in item_shops
+            ) or '<tr><td colspan="3" class="muted">Aucun ItemShops retourné.</td></tr>'
+            detail_html = f"""
+              <h2>Produit précis</h2>
+              <p class="muted">GET /Account/accountID/Item/{html.escape(resolved_item_id)}.json avec load_relations=ItemPrices,ItemShops</p>
+              <h3>JSON brut complet masqué</h3>
+              <pre style="white-space: pre-wrap;">{html.escape(mask_sensitive_text(json.dumps(raw_payload, ensure_ascii=False, indent=2)))}</pre>
+              <h3>ItemPrices</h3>
+              <table>
+                <thead><tr><th>amount</th><th>useType</th><th>useTypeID</th></tr></thead>
+                <tbody>{price_rows}</tbody>
+              </table>
+              <h3>ItemShops</h3>
+              <table>
+                <thead><tr><th>shopID</th><th>qoh</th><th>sellable</th></tr></thead>
+                <tbody>{shop_rows}</tbody>
+              </table>
+            """
+        except HTTPException as exc:
+            detail_html = f"<h2>Produit précis</h2>{api_error_html(exc)}"
+
     body = f"""
-      <p><a href="/lightspeed/stores">Retour aux succursales</a></p>
+      <p><a href="/lightspeed/stores">Succursales</a> | <a href="/lightspeed/price-levels">Niveaux de prix</a></p>
       <p class="muted">Diagnostic lecture seule. Succursale sélectionnée : {html.escape(shop_id)}. Aucune écriture Lightspeed, aucun envoi Google.</p>
+      <form action="/lightspeed/items-test" method="get">
+        <input name="shop_id" value="{html.escape(shop_id)}" placeholder="shopID optionnel" />
+        <input name="item_id" value="{html.escape(item_id)}" placeholder="itemID exact" />
+        <input name="upc" value="{html.escape(upc)}" placeholder="UPC exact" />
+        <button type="submit">Tester produit précis</button>
+      </form>
       <h2>Étape 1 - Requête simple sans relation</h2>
       <p class="muted">GET /Account/accountID/Item.json?limit=10</p>
       <table>
@@ -1675,6 +1794,7 @@ def lightspeed_items_test_page(
         </thead>
         <tbody>{related_rows}</tbody>
       </table>
+      {detail_html}
     """
     return diagnostic_page("Lightspeed R-Series - Test inventaire", body)
 
