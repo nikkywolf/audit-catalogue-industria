@@ -493,6 +493,10 @@ def refresh_lightspeed_retail_token() -> dict[str, Any]:
             "grant_type": "refresh_token",
         }
     )
+    if not refreshed.get("refresh_token"):
+        refreshed["refresh_token"] = token["refresh_token"]
+    if not refreshed.get("account_id") and token["account_id"]:
+        refreshed["account_id"] = token["account_id"]
     save_integration_token(LIGHTSPEED_RSERIES_PROVIDER, refreshed)
     return refreshed
 
@@ -505,6 +509,151 @@ def get_valid_lightspeed_retail_token() -> str:
         refreshed = refresh_lightspeed_retail_token()
         return str(refreshed.get("access_token") or "")
     return str(token["access_token"])
+
+
+def lightspeed_rseries_get(path: str, params: Optional[dict[str, Any]] = None, retry: bool = True) -> dict[str, Any]:
+    endpoint = path if path.startswith("/") else f"/{path}"
+    query = f"?{urlencode(params or {})}" if params else ""
+    url = f"https://api.lightspeedapp.com/API/V3{endpoint}{query}"
+    token = get_valid_lightspeed_retail_token()
+    request = UrlRequest(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "IndustriaCatalogueAudit/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = mask_sensitive_text(exc.read().decode("utf-8", errors="replace"))
+        if exc.code == 401 and retry:
+            logger.info("Lightspeed R-Series token expired during API call; refreshing token.")
+            refresh_lightspeed_retail_token()
+            return lightspeed_rseries_get(path, params=params, retry=False)
+        logger.warning("Lightspeed R-Series API GET failed: endpoint=%s status=%s body=%s", endpoint, exc.code, body)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Lightspeed R-Series a refusé la requête.",
+                "endpoint": endpoint,
+                "status": exc.code,
+                "body": body,
+            },
+        ) from exc
+
+
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def extract_collection(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = payload.get(key)
+    if isinstance(value, dict):
+        nested = value.get(key)
+        if nested is not None:
+            value = nested
+    return [item for item in as_list(value) if isinstance(item, dict)]
+
+
+def resolve_lightspeed_account_id() -> str:
+    token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
+    if token and token["account_id"]:
+        return str(token["account_id"])
+
+    payload = lightspeed_rseries_get("/Account.json")
+    accounts = extract_collection(payload, "Account")
+    if not accounts:
+        raise HTTPException(status_code=502, detail="Aucun compte Lightspeed R-Series retourné par l'API.")
+    account_id = str(accounts[0].get("accountID") or accounts[0].get("id") or "")
+    if not account_id:
+        raise HTTPException(status_code=502, detail="Lightspeed n'a pas retourné de accountID.")
+
+    if token:
+        save_integration_token(
+            LIGHTSPEED_RSERIES_PROVIDER,
+            {
+                "access_token": token["access_token"],
+                "refresh_token": token["refresh_token"],
+                "token_type": token["token_type"],
+                "scope": token["scope"],
+                "expires_in": max(0, int(token["expires_at"] or 0) - int(time.time())),
+                "refresh_expires_in": max(0, int(token["refresh_expires_at"] or 0) - int(time.time())),
+                "account_id": account_id,
+            },
+        )
+    return account_id
+
+
+def normalize_shop(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "shopID": clean(row.get("shopID") or row.get("id")),
+        "name": clean(row.get("name")),
+        "address": clean(row.get("address1") or row.get("address") or row.get("street1")),
+        "city": clean(row.get("city")),
+        "province": clean(row.get("state") or row.get("province")),
+        "postal_code": clean(row.get("zip") or row.get("postalCode") or row.get("postal_code")),
+    }
+
+
+def get_lightspeed_shops() -> list[dict[str, str]]:
+    account_id = resolve_lightspeed_account_id()
+    payload = lightspeed_rseries_get(f"/Account/{account_id}/Shop.json")
+    return [normalize_shop(row) for row in extract_collection(payload, "Shop")]
+
+
+def default_item_price(item: dict[str, Any]) -> str:
+    prices = item.get("Prices") or {}
+    item_prices = prices.get("ItemPrice") if isinstance(prices, dict) else []
+    for price in as_list(item_prices):
+        if not isinstance(price, dict):
+            continue
+        use_type = clean(price.get("useType")).lower()
+        use_type_id = clean(price.get("useTypeID"))
+        if use_type == "default" or use_type_id == "1":
+            return clean(price.get("amount"))
+    return clean(item.get("defaultPrice") or item.get("price"))
+
+
+def item_shop_quantity(item: dict[str, Any], shop_id: str) -> str:
+    item_shops = item.get("ItemShops") or {}
+    rows = item_shops.get("ItemShop") if isinstance(item_shops, dict) else []
+    for row in as_list(rows):
+        if not isinstance(row, dict):
+            continue
+        if clean(row.get("shopID")) == clean(shop_id):
+            return clean(row.get("qoh") or row.get("quantity") or row.get("available"))
+    return ""
+
+
+def get_lightspeed_items_for_shop(shop_id: str, limit: int = 10) -> list[dict[str, str]]:
+    account_id = resolve_lightspeed_account_id()
+    payload = lightspeed_rseries_get(
+        f"/Account/{account_id}/Item.json",
+        params={
+            "limit": max(1, min(limit, 10)),
+            "load_relations": json.dumps(["ItemShops", "Prices"]),
+        },
+    )
+    items = extract_collection(payload, "Item")[:10]
+    return [
+        {
+            "itemID": clean(item.get("itemID")),
+            "description": clean(item.get("description")),
+            "sku": clean(item.get("customSku") or item.get("systemSku") or item.get("manufacturerSku")),
+            "upc_ean": clean(item.get("upc") or item.get("ean")),
+            "default_price": default_item_price(item),
+            "quantity": item_shop_quantity(item, shop_id),
+        }
+        for item in items
+    ]
 
 
 def clean(value: Any) -> str:
@@ -1354,6 +1503,125 @@ def lightspeed_callback(
         </html>
         """
     )
+
+
+def diagnostic_page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"""
+        <!doctype html>
+        <html lang="fr">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{html.escape(title)}</title>
+            <style>
+              body {{ font-family: system-ui, sans-serif; margin: 32px; background: #0e1117; color: #f4f6fb; }}
+              a {{ color: #67d4c7; }}
+              table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+              th, td {{ border: 1px solid #2b313d; padding: 8px 10px; text-align: left; vertical-align: top; }}
+              th {{ background: #1b202b; }}
+              select, button {{ padding: 8px 10px; margin-right: 8px; }}
+              .error {{ border: 1px solid #ff7c7c; padding: 12px; color: #ffb3b3; white-space: pre-wrap; }}
+              .muted {{ color: #9da5b4; }}
+            </style>
+          </head>
+          <body>
+            <h1>{html.escape(title)}</h1>
+            {body}
+          </body>
+        </html>
+        """
+    )
+
+
+def api_error_html(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        text = json.dumps(detail, ensure_ascii=False, indent=2)
+    else:
+        text = str(detail)
+    return f'<div class="error">{html.escape(text)}</div>'
+
+
+@app.get("/lightspeed/stores")
+def lightspeed_stores_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    try:
+        shops = get_lightspeed_shops()
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed R-Series - Succursales", api_error_html(exc))
+
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(shop["shopID"])}</td>
+          <td>{html.escape(shop["name"])}</td>
+          <td>{html.escape(shop["address"])}</td>
+          <td>{html.escape(shop["city"])}</td>
+          <td>{html.escape(shop["province"])}</td>
+          <td>{html.escape(shop["postal_code"])}</td>
+        </tr>
+        """
+        for shop in shops
+    ) or '<tr><td colspan="6" class="muted">Aucune succursale retournée par Lightspeed.</td></tr>'
+    options = "".join(
+        f'<option value="{html.escape(shop["shopID"])}">{html.escape(shop["name"] or shop["shopID"])}</option>'
+        for shop in shops
+    )
+    body = f"""
+      <p class="muted">Diagnostic lecture seule. Aucun envoi à Google, aucune écriture Lightspeed.</p>
+      <table>
+        <thead>
+          <tr><th>ID R-Series</th><th>Nom</th><th>Adresse</th><th>Ville</th><th>Province</th><th>Code postal</th></tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <h2>Test inventaire par succursale</h2>
+      <form action="/lightspeed/items-test" method="get">
+        <select name="shop_id" required>{options}</select>
+        <button type="submit">Récupérer 10 articles</button>
+      </form>
+    """
+    return diagnostic_page("Lightspeed R-Series - Succursales", body)
+
+
+@app.get("/lightspeed/items-test")
+def lightspeed_items_test_page(
+    shop_id: str = "",
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    if not shop_id:
+        return diagnostic_page("Lightspeed R-Series - Test inventaire", '<div class="error">shop_id manquant.</div>')
+    try:
+        items = get_lightspeed_items_for_shop(shop_id, limit=10)
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed R-Series - Test inventaire", api_error_html(exc))
+
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(item["itemID"])}</td>
+          <td>{html.escape(item["description"])}</td>
+          <td>{html.escape(item["sku"])}</td>
+          <td>{html.escape(item["upc_ean"])}</td>
+          <td>{html.escape(item["default_price"])}</td>
+          <td>{html.escape(item["quantity"])}</td>
+        </tr>
+        """
+        for item in items
+    ) or '<tr><td colspan="6" class="muted">Aucun article retourné par Lightspeed.</td></tr>'
+    body = f"""
+      <p><a href="/lightspeed/stores">Retour aux succursales</a></p>
+      <p class="muted">Succursale testée : {html.escape(shop_id)}. Prix Default seulement. Aucun prix Salon.</p>
+      <table>
+        <thead>
+          <tr><th>itemID</th><th>Description</th><th>SKU</th><th>UPC/EAN</th><th>Prix Default</th><th>Quantité disponible</th></tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    """
+    return diagnostic_page("Lightspeed R-Series - Test inventaire", body)
 
 
 @app.get("/api/bootstrap")
