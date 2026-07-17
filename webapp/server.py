@@ -15,7 +15,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 import uuid
@@ -234,6 +234,37 @@ def ensure_integration_tables() -> None:
                 refresh_expires_at INTEGER DEFAULT 0,
                 account_id TEXT DEFAULT '',
                 updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def ensure_ecom_api_tables() -> None:
+    with connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS ecom_api_products (
+                Internal_Variant_ID TEXT PRIMARY KEY,
+                Internal_ID TEXT NOT NULL,
+                Brand TEXT DEFAULT '',
+                Product_Title TEXT DEFAULT '',
+                SKU TEXT DEFAULT '',
+                UPC TEXT DEFAULT '',
+                Visible TEXT DEFAULT '',
+                mapped_payload TEXT NOT NULL,
+                product_payload TEXT NOT NULL,
+                variant_payload TEXT NOT NULL,
+                synced_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ecom_api_sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                products_seen INTEGER NOT NULL DEFAULT 0,
+                variants_saved INTEGER NOT NULL DEFAULT 0,
+                message TEXT DEFAULT ''
             );
             """
         )
@@ -714,6 +745,22 @@ def lightspeed_ecom_get_products_test_raw() -> tuple[str, str]:
     raise HTTPException(status_code=502, detail="Aucun endpoint eCom testé.")
 
 
+def lightspeed_ecom_get_products_raw(limit: int, offset: int) -> tuple[str, str]:
+    last_error: HTTPException | None = None
+    for endpoint in lightspeed_ecom_candidate_endpoints():
+        try:
+            return lightspeed_ecom_get_raw(endpoint, {"limit": limit, "offset": offset})
+        except HTTPException as exc:
+            last_error = exc
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            body = str(detail.get("body", ""))
+            if "Unknown or inactive language" not in body:
+                raise
+    if last_error:
+        raise last_error
+    raise HTTPException(status_code=502, detail="Aucun endpoint eCom testé.")
+
+
 def resource_link(value: Any) -> str:
     if isinstance(value, dict):
         link = value.get("link")
@@ -943,6 +990,104 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
             }
         )
     return rows
+
+
+def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    limit = max(1, min(int(limit), 250))
+    page_size = min(50, limit)
+    started_at = now_text()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO ecom_api_sync_runs (status, started_at, message)
+            VALUES ('running', ?, '')
+            """,
+            (started_at,),
+        )
+        run_id = int(cursor.lastrowid)
+
+    products_seen = 0
+    variants_saved = 0
+    try:
+        offset = 0
+        while products_seen < limit:
+            batch_limit = min(page_size, limit - products_seen)
+            _, raw_body = lightspeed_ecom_get_products_raw(batch_limit, offset)
+            payload = json.loads(raw_body)
+            products = extract_ecom_products(payload)
+            if not products:
+                break
+
+            with connect() as conn:
+                for product in products:
+                    context = ecom_product_context(product)
+                    mapped_rows = ecom_audit_candidate_rows(product, context)
+                    variants_by_id = {
+                        clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")): variant
+                        for variant in context.get("variants", [])
+                        if isinstance(variant, dict)
+                    }
+                    for row in mapped_rows:
+                        variant_id = clean(row.get("Internal_Variant_ID"))
+                        if not variant_id:
+                            continue
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO ecom_api_products
+                            (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
+                             mapped_payload, product_payload, variant_payload, synced_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                variant_id,
+                                clean(row.get("Internal_ID")),
+                                clean(row.get("Brand")),
+                                clean(row.get("FC_Title_Short")),
+                                clean(row.get("SKU")),
+                                clean(row.get("UPC")),
+                                clean(row.get("Visible")),
+                                json.dumps(row, ensure_ascii=False),
+                                json.dumps(product, ensure_ascii=False),
+                                json.dumps(variants_by_id.get(variant_id, {}), ensure_ascii=False),
+                                started_at,
+                            ),
+                        )
+                        variants_saved += 1
+            products_seen += len(products)
+            if len(products) < batch_limit:
+                break
+            offset += len(products)
+
+        message = f"{products_seen} produit(s) lus, {variants_saved} variante(s) sauvegardée(s)."
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE ecom_api_sync_runs
+                SET status = 'success', finished_at = ?, products_seen = ?, variants_saved = ?, message = ?
+                WHERE id = ?
+                """,
+                (now_text(), products_seen, variants_saved, message, run_id),
+            )
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "products_seen": products_seen,
+            "variants_saved": variants_saved,
+            "message": message,
+        }
+    except Exception as exc:
+        message = mask_sensitive_text_full(str(exc))[:1000]
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE ecom_api_sync_runs
+                SET status = 'error', finished_at = ?, products_seen = ?, variants_saved = ?, message = ?
+                WHERE id = ?
+                """,
+                (now_text(), products_seen, variants_saved, message, run_id),
+            )
+        raise
 
 
 def ecom_mapping_status(row: dict[str, str], field: str, source: str, required: bool = True) -> dict[str, str]:
@@ -2423,6 +2568,117 @@ def catalogue_ecom_map_test_page(x_remote_user: Optional[str] = Header(default=N
       </table>
     """
     return diagnostic_page("Lightspeed eCom C-Series - Mapping audit", body)
+
+
+def ecom_api_sync_status() -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        product_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products").fetchone()[0])
+        latest = conn.execute(
+            """
+            SELECT *
+            FROM ecom_api_sync_runs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        rows = conn.execute(
+            """
+            SELECT Internal_ID, Internal_Variant_ID, Brand, Product_Title, SKU, UPC, Visible, synced_at
+            FROM ecom_api_products
+            ORDER BY synced_at DESC, Brand, Product_Title
+            LIMIT 25
+            """
+        ).fetchall()
+    return {
+        "product_count": product_count,
+        "latest": dict(latest) if latest else None,
+        "rows": [dict(row) for row in rows],
+    }
+
+
+@app.get("/catalogue/ecom-api-sync")
+def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    status = ecom_api_sync_status()
+    latest = status["latest"] or {}
+    latest_html = (
+        f"""
+        <table>
+          <tbody>
+            <tr><th>Statut</th><td>{html.escape(clean(latest.get("status")))}</td></tr>
+            <tr><th>Début</th><td>{html.escape(clean(latest.get("started_at")))}</td></tr>
+            <tr><th>Fin</th><td>{html.escape(clean(latest.get("finished_at")))}</td></tr>
+            <tr><th>Produits lus</th><td>{html.escape(clean(latest.get("products_seen")))}</td></tr>
+            <tr><th>Variantes sauvegardées</th><td>{html.escape(clean(latest.get("variants_saved")))}</td></tr>
+            <tr><th>Message</th><td>{html.escape(clean(latest.get("message")))}</td></tr>
+          </tbody>
+        </table>
+        """
+        if latest
+        else '<p class="muted">Aucune synchronisation eCom API lancée.</p>'
+    )
+    rows_html = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(clean(row["Internal_ID"]))}</td>
+          <td>{html.escape(clean(row["Internal_Variant_ID"]))}</td>
+          <td>{html.escape(clean(row["Brand"]))}</td>
+          <td>{html.escape(clean(row["Product_Title"]))}</td>
+          <td>{html.escape(clean(row["SKU"]))}</td>
+          <td>{html.escape(clean(row["UPC"]))}</td>
+          <td>{html.escape(clean(row["Visible"]))}</td>
+          <td>{html.escape(clean(row["synced_at"]))}</td>
+        </tr>
+        """
+        for row in status["rows"]
+    ) or '<tr><td colspan="8" class="muted">Aucune ligne eCom API sauvegardée.</td></tr>'
+    body = f"""
+      <p class="muted">Synchronisation manuelle vers une table séparée. Ne modifie pas l'audit CSV actuel.</p>
+      <p><strong>Lignes eCom API sauvegardées :</strong> {status["product_count"]}</p>
+      <form action="/catalogue/ecom-api-sync" method="post">
+        <label>Nombre de produits à lire :
+          <input name="limit" type="number" min="1" max="250" value="100" />
+        </label>
+        <button type="submit">Synchroniser eCom API</button>
+      </form>
+      <h2>Dernière synchronisation</h2>
+      {latest_html}
+      <h2>Dernières lignes sauvegardées</h2>
+      <table>
+        <thead>
+          <tr><th>Internal_ID</th><th>Internal_Variant_ID</th><th>Brand</th><th>Produit</th><th>SKU</th><th>UPC</th><th>Visible</th><th>Sync</th></tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    """
+    return diagnostic_page("Lightspeed eCom API - Sync séparée", body)
+
+
+@app.post("/catalogue/ecom-api-sync")
+async def catalogue_ecom_api_sync_submit(
+    request: Request,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    body_bytes = await request.body()
+    form = parse_qs(body_bytes.decode("utf-8", errors="replace"))
+    limit = int(clean((form.get("limit") or ["100"])[0]) or 100)
+    try:
+        result = sync_ecom_api_products(limit)
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom API - Sync séparée", api_error_html(exc))
+    except Exception as exc:
+        return diagnostic_page(
+            "Lightspeed eCom API - Sync séparée",
+            f'<div class="error">{html.escape(mask_sensitive_text_full(str(exc))[:2000])}</div>',
+        )
+    body = f"""
+      <p><strong>{html.escape(result["message"])}</strong></p>
+      <p><a href="/catalogue/ecom-api-sync">Retour au statut eCom API</a></p>
+      <p><a href="/catalogue/ecom-map-test">Voir le mapping</a></p>
+    """
+    return diagnostic_page("Lightspeed eCom API - Sync terminée", body)
 
 
 @app.get("/api/bootstrap")
