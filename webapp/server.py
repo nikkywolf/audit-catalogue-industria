@@ -254,6 +254,7 @@ def ensure_ecom_api_tables() -> None:
                 mapped_payload TEXT NOT NULL,
                 product_payload TEXT NOT NULL,
                 variant_payload TEXT NOT NULL,
+                enriched_at TEXT DEFAULT '',
                 synced_at TEXT NOT NULL
             );
 
@@ -275,6 +276,9 @@ def ensure_ecom_api_tables() -> None:
             conn.execute("ALTER TABLE ecom_api_sync_runs ADD COLUMN start_offset INTEGER NOT NULL DEFAULT 0")
         if "next_offset" not in columns:
             conn.execute("ALTER TABLE ecom_api_sync_runs ADD COLUMN next_offset INTEGER NOT NULL DEFAULT 0")
+        product_columns = {row["name"] for row in conn.execute("PRAGMA table_info(ecom_api_products)").fetchall()}
+        if "enriched_at" not in product_columns:
+            conn.execute("ALTER TABLE ecom_api_products ADD COLUMN enriched_at TEXT DEFAULT ''")
 
 
 def hash_oauth_state(state: str) -> str:
@@ -1066,39 +1070,48 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
 
             with connect() as conn:
                 for product in products:
-                    context = ecom_product_context(product)
-                    mapped_rows = ecom_audit_candidate_rows(product, context)
-                    variants_by_id = {
-                        clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")): variant
-                        for variant in context.get("variants", [])
-                        if isinstance(variant, dict)
+                    product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
+                    if not product_id_value:
+                        continue
+                    quick_row = {
+                        "Internal_ID": product_id_value,
+                        "Internal_Variant_ID": product_id_value,
+                        "Brand": "",
+                        "FC_Title_Short": clean(product.get("title")),
+                        "US_Title_Short": clean(product.get("title")),
+                        "SKU": "",
+                        "UPC": "",
+                        "Visible": "Y" if str(product.get("isVisible")).lower() == "true" or clean(product.get("visibility")).lower() == "visible" else "N",
+                        "Images": "",
+                        "FC_Description_Short": clean(product.get("description")),
+                        "FC_Description_Long": clean(product.get("content")),
+                        "URL": clean(product.get("url")),
+                        "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
+                        "needs_enrichment": "Y",
                     }
-                    for row in mapped_rows:
-                        variant_id = clean(row.get("Internal_Variant_ID"))
-                        if not variant_id:
-                            continue
-                        conn.execute(
-                            """
-                            INSERT OR REPLACE INTO ecom_api_products
-                            (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
-                             mapped_payload, product_payload, variant_payload, synced_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                variant_id,
-                                clean(row.get("Internal_ID")),
-                                clean(row.get("Brand")),
-                                clean(row.get("FC_Title_Short")),
-                                clean(row.get("SKU")),
-                                clean(row.get("UPC")),
-                                clean(row.get("Visible")),
-                                json.dumps(row, ensure_ascii=False),
-                                json.dumps(product, ensure_ascii=False),
-                                json.dumps(variants_by_id.get(variant_id, {}), ensure_ascii=False),
-                                started_at,
-                            ),
-                        )
-                        variants_saved += 1
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO ecom_api_products
+                        (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
+                         mapped_payload, product_payload, variant_payload, enriched_at, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT enriched_at FROM ecom_api_products WHERE Internal_Variant_ID = ?), ''), ?)
+                        """,
+                        (
+                            product_id_value,
+                            product_id_value,
+                            "",
+                            clean(product.get("title")),
+                            "",
+                            "",
+                            clean(quick_row["Visible"]),
+                            json.dumps(quick_row, ensure_ascii=False),
+                            json.dumps(product, ensure_ascii=False),
+                            "{}",
+                            product_id_value,
+                            started_at,
+                        ),
+                    )
+                    variants_saved += 1
             products_seen += len(products)
             offset += len(products)
             with connect() as conn:
@@ -1115,7 +1128,7 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
             time.sleep(1.5)
 
         message = (
-            f"{products_seen} produit(s) lus, {variants_saved} variante(s) sauvegardée(s). "
+            f"Sync rapide: {products_seen} produit(s) lus, {variants_saved} ligne(s) sauvegardée(s). "
             f"Prochain offset: {offset}."
         )
         with connect() as conn:
@@ -1147,6 +1160,78 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
                 (now_text(), products_seen, variants_saved, offset, message, run_id),
             )
         raise
+
+
+def enrich_ecom_api_products(limit: int = 10) -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    limit = max(1, min(int(limit), 25))
+    enriched_at = now_text()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT Internal_ID, product_payload
+            FROM ecom_api_products
+            WHERE COALESCE(enriched_at, '') = ''
+            ORDER BY synced_at, Internal_ID
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    products_seen = 0
+    variants_saved = 0
+    for row in rows:
+        try:
+            product = json.loads(row["product_payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(product, dict):
+            continue
+        context = ecom_product_context(product)
+        mapped_rows = ecom_audit_candidate_rows(product, context)
+        variants_by_id = {
+            clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")): variant
+            for variant in context.get("variants", [])
+            if isinstance(variant, dict)
+        }
+        product_id_value = clean(product.get("id") or row["Internal_ID"])
+        with connect() as conn:
+            conn.execute("DELETE FROM ecom_api_products WHERE Internal_Variant_ID = ?", (product_id_value,))
+            for mapped in mapped_rows:
+                variant_id = clean(mapped.get("Internal_Variant_ID"))
+                if not variant_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ecom_api_products
+                    (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
+                     mapped_payload, product_payload, variant_payload, enriched_at, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        variant_id,
+                        clean(mapped.get("Internal_ID")),
+                        clean(mapped.get("Brand")),
+                        clean(mapped.get("FC_Title_Short")),
+                        clean(mapped.get("SKU")),
+                        clean(mapped.get("UPC")),
+                        clean(mapped.get("Visible")),
+                        json.dumps(mapped, ensure_ascii=False),
+                        json.dumps(product, ensure_ascii=False),
+                        json.dumps(variants_by_id.get(variant_id, {}), ensure_ascii=False),
+                        enriched_at,
+                        enriched_at,
+                    ),
+                )
+                variants_saved += 1
+        products_seen += 1
+        time.sleep(1.5)
+    return {
+        "ok": True,
+        "products_enriched": products_seen,
+        "variants_saved": variants_saved,
+        "message": f"{products_seen} produit(s) enrichi(s), {variants_saved} variante(s) sauvegardée(s).",
+    }
 
 
 def ecom_mapping_status(row: dict[str, str], field: str, source: str, required: bool = True) -> dict[str, str]:
@@ -2633,6 +2718,8 @@ def ecom_api_sync_status() -> dict[str, Any]:
     ensure_ecom_api_tables()
     with connect() as conn:
         product_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products").fetchone()[0])
+        enriched_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products WHERE COALESCE(enriched_at, '') != ''").fetchone()[0])
+        pending_enrichment_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products WHERE COALESCE(enriched_at, '') = ''").fetchone()[0])
         latest = conn.execute(
             """
             SELECT *
@@ -2651,6 +2738,8 @@ def ecom_api_sync_status() -> dict[str, Any]:
         ).fetchall()
     return {
         "product_count": product_count,
+        "enriched_count": enriched_count,
+        "pending_enrichment_count": pending_enrichment_count,
         "latest": dict(latest) if latest else None,
         "rows": [dict(row) for row in rows],
     }
@@ -2697,11 +2786,18 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
     body = f"""
       <p class="muted">Synchronisation manuelle vers une table séparée. Ne modifie pas l'audit CSV actuel.</p>
       <p><strong>Lignes eCom API sauvegardées :</strong> {status["product_count"]}</p>
+      <p><strong>Enrichies :</strong> {status["enriched_count"]} | <strong>À enrichir :</strong> {status["pending_enrichment_count"]}</p>
       <form action="/catalogue/ecom-api-sync" method="post">
         <label>Nombre de produits à lire :
-          <input name="limit" type="number" min="1" max="200" value="50" />
+          <input name="limit" type="number" min="1" max="200" value="100" />
         </label>
-        <button type="submit">Synchroniser eCom API</button>
+        <button type="submit">Sync rapide eCom API</button>
+      </form>
+      <form action="/catalogue/ecom-api-enrich" method="post" style="margin-top: 12px;">
+        <label>Produits à enrichir :
+          <input name="limit" type="number" min="1" max="25" value="10" />
+        </label>
+        <button type="submit">Enrichir données manquantes</button>
       </form>
       <h2>Dernière synchronisation</h2>
       {latest_html}
@@ -2740,6 +2836,32 @@ async def catalogue_ecom_api_sync_submit(
       <p><a href="/catalogue/ecom-map-test">Voir le mapping</a></p>
     """
     return diagnostic_page("Lightspeed eCom API - Sync terminée", body)
+
+
+@app.post("/catalogue/ecom-api-enrich")
+async def catalogue_ecom_api_enrich_submit(
+    request: Request,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    body_bytes = await request.body()
+    form = parse_qs(body_bytes.decode("utf-8", errors="replace"))
+    limit = int(clean((form.get("limit") or ["10"])[0]) or 10)
+    try:
+        result = enrich_ecom_api_products(limit)
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom API - Enrichissement", api_error_html(exc))
+    except Exception as exc:
+        return diagnostic_page(
+            "Lightspeed eCom API - Enrichissement",
+            f'<div class="error">{html.escape(mask_sensitive_text_full(str(exc))[:2000])}</div>',
+        )
+    body = f"""
+      <p><strong>{html.escape(result["message"])}</strong></p>
+      <p><a href="/catalogue/ecom-api-sync">Retour au statut eCom API</a></p>
+      <p><a href="/catalogue/ecom-map-test">Voir le mapping</a></p>
+    """
+    return diagnostic_page("Lightspeed eCom API - Enrichissement terminé", body)
 
 
 @app.get("/api/bootstrap")
