@@ -264,10 +264,17 @@ def ensure_ecom_api_tables() -> None:
                 finished_at TEXT,
                 products_seen INTEGER NOT NULL DEFAULT 0,
                 variants_saved INTEGER NOT NULL DEFAULT 0,
+                start_offset INTEGER NOT NULL DEFAULT 0,
+                next_offset INTEGER NOT NULL DEFAULT 0,
                 message TEXT DEFAULT ''
             );
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(ecom_api_sync_runs)").fetchall()}
+        if "start_offset" not in columns:
+            conn.execute("ALTER TABLE ecom_api_sync_runs ADD COLUMN start_offset INTEGER NOT NULL DEFAULT 0")
+        if "next_offset" not in columns:
+            conn.execute("ALTER TABLE ecom_api_sync_runs ADD COLUMN next_offset INTEGER NOT NULL DEFAULT 0")
 
 
 def hash_oauth_state(state: str) -> str:
@@ -994,26 +1001,64 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
 
 def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
     ensure_ecom_api_tables()
-    limit = max(1, min(int(limit), 250))
-    page_size = min(50, limit)
+    limit = max(1, min(int(limit), 200))
+    page_size = min(10, limit)
     started_at = now_text()
     with connect() as conn:
+        latest = conn.execute(
+            """
+            SELECT next_offset
+            FROM ecom_api_sync_runs
+            WHERE status IN ('success', 'paused')
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        start_offset = int(latest["next_offset"]) if latest else 0
         cursor = conn.execute(
             """
-            INSERT INTO ecom_api_sync_runs (status, started_at, message)
-            VALUES ('running', ?, '')
+            INSERT INTO ecom_api_sync_runs (status, started_at, start_offset, next_offset, message)
+            VALUES ('running', ?, ?, ?, '')
             """,
-            (started_at,),
+            (started_at, start_offset, start_offset),
         )
         run_id = int(cursor.lastrowid)
 
     products_seen = 0
     variants_saved = 0
+    offset = start_offset
     try:
-        offset = 0
         while products_seen < limit:
             batch_limit = min(page_size, limit - products_seen)
-            _, raw_body = lightspeed_ecom_get_products_raw(batch_limit, offset)
+            try:
+                _, raw_body = lightspeed_ecom_get_products_raw(batch_limit, offset)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                if detail.get("status") == 429 or "Too many requests" in str(detail.get("body", "")):
+                    message = (
+                        f"Pause limite Lightspeed à offset {offset}. "
+                        "Relance la synchronisation plus tard pour reprendre."
+                    )
+                    with connect() as conn:
+                        conn.execute(
+                            """
+                            UPDATE ecom_api_sync_runs
+                            SET status = 'paused', finished_at = ?, products_seen = ?, variants_saved = ?,
+                                next_offset = ?, message = ?
+                            WHERE id = ?
+                            """,
+                            (now_text(), products_seen, variants_saved, offset, message, run_id),
+                        )
+                    return {
+                        "ok": True,
+                        "paused": True,
+                        "run_id": run_id,
+                        "products_seen": products_seen,
+                        "variants_saved": variants_saved,
+                        "next_offset": offset,
+                        "message": message,
+                    }
+                raise
             payload = json.loads(raw_body)
             products = extract_ecom_products(payload)
             if not products:
@@ -1055,25 +1100,39 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
                         )
                         variants_saved += 1
             products_seen += len(products)
+            offset += len(products)
+            with connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE ecom_api_sync_runs
+                    SET products_seen = ?, variants_saved = ?, next_offset = ?
+                    WHERE id = ?
+                    """,
+                    (products_seen, variants_saved, offset, run_id),
+                )
             if len(products) < batch_limit:
                 break
-            offset += len(products)
+            time.sleep(1.5)
 
-        message = f"{products_seen} produit(s) lus, {variants_saved} variante(s) sauvegardée(s)."
+        message = (
+            f"{products_seen} produit(s) lus, {variants_saved} variante(s) sauvegardée(s). "
+            f"Prochain offset: {offset}."
+        )
         with connect() as conn:
             conn.execute(
                 """
                 UPDATE ecom_api_sync_runs
-                SET status = 'success', finished_at = ?, products_seen = ?, variants_saved = ?, message = ?
+                SET status = 'success', finished_at = ?, products_seen = ?, variants_saved = ?, next_offset = ?, message = ?
                 WHERE id = ?
                 """,
-                (now_text(), products_seen, variants_saved, message, run_id),
+                (now_text(), products_seen, variants_saved, offset, message, run_id),
             )
         return {
             "ok": True,
             "run_id": run_id,
             "products_seen": products_seen,
             "variants_saved": variants_saved,
+            "next_offset": offset,
             "message": message,
         }
     except Exception as exc:
@@ -1082,10 +1141,10 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
             conn.execute(
                 """
                 UPDATE ecom_api_sync_runs
-                SET status = 'error', finished_at = ?, products_seen = ?, variants_saved = ?, message = ?
+                SET status = 'error', finished_at = ?, products_seen = ?, variants_saved = ?, next_offset = ?, message = ?
                 WHERE id = ?
                 """,
-                (now_text(), products_seen, variants_saved, message, run_id),
+                (now_text(), products_seen, variants_saved, offset, message, run_id),
             )
         raise
 
@@ -2609,6 +2668,8 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
             <tr><th>Statut</th><td>{html.escape(clean(latest.get("status")))}</td></tr>
             <tr><th>Début</th><td>{html.escape(clean(latest.get("started_at")))}</td></tr>
             <tr><th>Fin</th><td>{html.escape(clean(latest.get("finished_at")))}</td></tr>
+            <tr><th>Offset départ</th><td>{html.escape(clean(latest.get("start_offset")))}</td></tr>
+            <tr><th>Prochain offset</th><td>{html.escape(clean(latest.get("next_offset")))}</td></tr>
             <tr><th>Produits lus</th><td>{html.escape(clean(latest.get("products_seen")))}</td></tr>
             <tr><th>Variantes sauvegardées</th><td>{html.escape(clean(latest.get("variants_saved")))}</td></tr>
             <tr><th>Message</th><td>{html.escape(clean(latest.get("message")))}</td></tr>
@@ -2638,7 +2699,7 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
       <p><strong>Lignes eCom API sauvegardées :</strong> {status["product_count"]}</p>
       <form action="/catalogue/ecom-api-sync" method="post">
         <label>Nombre de produits à lire :
-          <input name="limit" type="number" min="1" max="250" value="100" />
+          <input name="limit" type="number" min="1" max="200" value="50" />
         </label>
         <button type="submit">Synchroniser eCom API</button>
       </form>
