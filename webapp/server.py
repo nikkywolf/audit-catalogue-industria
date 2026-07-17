@@ -609,51 +609,72 @@ def get_lightspeed_shops() -> list[dict[str, str]]:
     return [normalize_shop(row) for row in extract_collection(payload, "Shop")]
 
 
-def default_item_price(item: dict[str, Any]) -> str:
-    prices = item.get("Prices") or {}
-    item_prices = prices.get("ItemPrice") if isinstance(prices, dict) else []
-    for price in as_list(item_prices):
-        if not isinstance(price, dict):
-            continue
-        use_type = clean(price.get("useType")).lower()
-        use_type_id = clean(price.get("useTypeID"))
-        if use_type == "default" or use_type_id == "1":
-            return clean(price.get("amount"))
-    return clean(item.get("defaultPrice") or item.get("price"))
+def simplify_item_price_rows(item: dict[str, Any]) -> list[dict[str, str]]:
+    item_prices = item.get("ItemPrices") or {}
+    rows = item_prices.get("ItemPrice") if isinstance(item_prices, dict) else item_prices
+    return [
+        {
+            "amount": clean(row.get("amount")),
+            "useType": clean(row.get("useType")),
+        }
+        for row in as_list(rows)
+        if isinstance(row, dict)
+    ]
 
 
-def item_shop_quantity(item: dict[str, Any], shop_id: str) -> str:
+def simplify_item_shop_rows(item: dict[str, Any]) -> list[dict[str, str]]:
     item_shops = item.get("ItemShops") or {}
-    rows = item_shops.get("ItemShop") if isinstance(item_shops, dict) else []
-    for row in as_list(rows):
-        if not isinstance(row, dict):
-            continue
-        if clean(row.get("shopID")) == clean(shop_id):
-            return clean(row.get("qoh") or row.get("quantity") or row.get("available"))
-    return ""
+    rows = item_shops.get("ItemShop") if isinstance(item_shops, dict) else item_shops
+    return [
+        {
+            "shopID": clean(row.get("shopID")),
+            "qoh": clean(row.get("qoh")),
+            "sellable": clean(row.get("sellable")),
+        }
+        for row in as_list(rows)
+        if isinstance(row, dict)
+    ]
 
 
-def get_lightspeed_items_for_shop(shop_id: str, limit: int = 10) -> list[dict[str, str]]:
+def summarize_simple_item(item: dict[str, Any]) -> dict[str, str]:
+    return {
+        "itemID": clean(item.get("itemID")),
+        "description": clean(item.get("description")),
+        "customSku": clean(item.get("customSku")),
+        "upc": clean(item.get("upc")),
+        "defaultCost": clean(item.get("defaultCost")),
+        "archived": clean(item.get("archived")),
+        "deleted": clean(item.get("deleted")),
+    }
+
+
+def summarize_related_item(item: dict[str, Any]) -> dict[str, Any]:
+    summary = summarize_simple_item(item)
+    summary["ItemPrices"] = simplify_item_price_rows(item)
+    summary["ItemShops"] = simplify_item_shop_rows(item)
+    return summary
+
+
+def get_lightspeed_simple_items(limit: int = 10) -> list[dict[str, str]]:
+    account_id = resolve_lightspeed_account_id()
+    payload = lightspeed_rseries_get(
+        f"/Account/{account_id}/Item.json",
+        params={"limit": max(1, min(limit, 10))},
+    )
+    return [summarize_simple_item(item) for item in extract_collection(payload, "Item")[:10]]
+
+
+def get_lightspeed_items_with_inventory_relations(limit: int = 10) -> list[dict[str, Any]]:
     account_id = resolve_lightspeed_account_id()
     payload = lightspeed_rseries_get(
         f"/Account/{account_id}/Item.json",
         params={
             "limit": max(1, min(limit, 10)),
-            "load_relations": json.dumps(["ItemShops", "Prices"]),
+            "load_relations": json.dumps(["ItemPrices", "ItemShops"]),
         },
     )
     items = extract_collection(payload, "Item")[:10]
-    return [
-        {
-            "itemID": clean(item.get("itemID")),
-            "description": clean(item.get("description")),
-            "sku": clean(item.get("customSku") or item.get("systemSku") or item.get("manufacturerSku")),
-            "upc_ean": clean(item.get("upc") or item.get("ean")),
-            "default_price": default_item_price(item),
-            "quantity": item_shop_quantity(item, shop_id),
-        }
-        for item in items
-    ]
+    return [summarize_related_item(item) for item in items]
 
 
 def clean(value: Any) -> str:
@@ -1594,31 +1615,65 @@ def lightspeed_items_test_page(
     if not shop_id:
         return diagnostic_page("Lightspeed R-Series - Test inventaire", '<div class="error">shop_id manquant.</div>')
     try:
-        items = get_lightspeed_items_for_shop(shop_id, limit=10)
+        simple_items = get_lightspeed_simple_items(limit=10)
     except HTTPException as exc:
         return diagnostic_page("Lightspeed R-Series - Test inventaire", api_error_html(exc))
 
-    rows = "".join(
+    simple_rows = "".join(
         f"""
         <tr>
           <td>{html.escape(item["itemID"])}</td>
           <td>{html.escape(item["description"])}</td>
-          <td>{html.escape(item["sku"])}</td>
-          <td>{html.escape(item["upc_ean"])}</td>
-          <td>{html.escape(item["default_price"])}</td>
-          <td>{html.escape(item["quantity"])}</td>
+          <td>{html.escape(item["customSku"])}</td>
+          <td>{html.escape(item["upc"])}</td>
+          <td>{html.escape(item["defaultCost"])}</td>
+          <td>{html.escape(item["archived"])}</td>
+          <td>{html.escape(item["deleted"])}</td>
         </tr>
         """
-        for item in items
-    ) or '<tr><td colspan="6" class="muted">Aucun article retourné par Lightspeed.</td></tr>'
+        for item in simple_items
+    ) or '<tr><td colspan="7" class="muted">Aucun article retourné par Lightspeed.</td></tr>'
+
+    relation_error = ""
+    related_items: list[dict[str, Any]] = []
+    try:
+        related_items = get_lightspeed_items_with_inventory_relations(limit=10)
+    except HTTPException as exc:
+        relation_error = api_error_html(exc)
+
+    related_rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(item["description"])}</td>
+          <td>{html.escape(item["upc"])}</td>
+          <td>{html.escape(item["customSku"])}</td>
+          <td><pre>{html.escape(json.dumps(item["ItemPrices"], ensure_ascii=False, indent=2))}</pre></td>
+          <td><pre>{html.escape(json.dumps(item["ItemShops"], ensure_ascii=False, indent=2))}</pre></td>
+        </tr>
+        """
+        for item in related_items
+    ) or '<tr><td colspan="5" class="muted">Relations non retournées ou aucun article.</td></tr>'
+
     body = f"""
       <p><a href="/lightspeed/stores">Retour aux succursales</a></p>
-      <p class="muted">Succursale testée : {html.escape(shop_id)}. Prix Default seulement. Aucun prix Salon.</p>
+      <p class="muted">Diagnostic lecture seule. Succursale sélectionnée : {html.escape(shop_id)}. Aucune écriture Lightspeed, aucun envoi Google.</p>
+      <h2>Étape 1 - Requête simple sans relation</h2>
+      <p class="muted">GET /Account/accountID/Item.json?limit=10</p>
       <table>
         <thead>
-          <tr><th>itemID</th><th>Description</th><th>SKU</th><th>UPC/EAN</th><th>Prix Default</th><th>Quantité disponible</th></tr>
+          <tr><th>itemID</th><th>description</th><th>customSku</th><th>upc</th><th>defaultCost</th><th>archived</th><th>deleted</th></tr>
         </thead>
-        <tbody>{rows}</tbody>
+        <tbody>{simple_rows}</tbody>
+      </table>
+
+      <h2>Étape 2 - Relations documentées</h2>
+      <p class="muted">load_relations = ItemPrices, ItemShops.</p>
+      {relation_error}
+      <table>
+        <thead>
+          <tr><th>description</th><th>UPC</th><th>customSku</th><th>ItemPrices amount/useType</th><th>ItemShops shopID/qoh/sellable</th></tr>
+        </thead>
+        <tbody>{related_rows}</tbody>
       </table>
     """
     return diagnostic_page("Lightspeed R-Series - Test inventaire", body)
