@@ -656,6 +656,11 @@ def lightspeed_ecom_candidate_endpoints() -> list[str]:
 
 def lightspeed_ecom_get_raw(endpoint: str, params: Optional[dict[str, Any]] = None) -> tuple[str, str]:
     config = lightspeed_ecom_config()
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        parsed = urlsplit(endpoint)
+        endpoint = parsed.path
+        if parsed.query:
+            endpoint = f"{endpoint}?{parsed.query}"
     endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
     query = f"?{urlencode(params or {})}" if params else ""
     url = f"{config['base_url']}{endpoint}{query}"
@@ -687,6 +692,12 @@ def lightspeed_ecom_get_raw(endpoint: str, params: Optional[dict[str, Any]] = No
         ) from exc
 
 
+def lightspeed_ecom_get_json(endpoint: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    _, raw_body = lightspeed_ecom_get_raw(endpoint, params)
+    payload = json.loads(raw_body)
+    return payload if isinstance(payload, dict) else {}
+
+
 def lightspeed_ecom_get_products_test_raw() -> tuple[str, str]:
     last_error: HTTPException | None = None
     for endpoint in lightspeed_ecom_candidate_endpoints():
@@ -701,6 +712,17 @@ def lightspeed_ecom_get_products_test_raw() -> tuple[str, str]:
     if last_error:
         raise last_error
     raise HTTPException(status_code=502, detail="Aucun endpoint eCom testé.")
+
+
+def resource_link(value: Any) -> str:
+    if isinstance(value, dict):
+        link = value.get("link")
+        if link:
+            return clean(link)
+        resource = value.get("resource")
+        if isinstance(resource, dict):
+            return clean(resource.get("link"))
+    return ""
 
 
 def extract_ecom_products(payload: Any) -> list[dict[str, Any]]:
@@ -741,12 +763,54 @@ def first_nested_dict(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
     return {}
 
 
-def simplify_ecom_product(product: dict[str, Any]) -> dict[str, Any]:
+def collection_from_payload(payload: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = value.get(key[:-1]) or value.get(key) or value.get("data")
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+            return [value]
+    return []
+
+
+def get_ecom_resource_collection(resource: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    link = resource_link(resource)
+    if not link:
+        return []
+    try:
+        return collection_from_payload(lightspeed_ecom_get_json(link), keys)
+    except (HTTPException, json.JSONDecodeError) as exc:
+        logger.warning("Lightspeed eCom linked resource failed: link=%s error=%s", link, exc)
+        return []
+
+
+def get_ecom_resource_record(resource: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    link = resource_link(resource)
+    if not link:
+        return first_nested_dict(resource, keys)
+    try:
+        payload = lightspeed_ecom_get_json(link)
+    except (HTTPException, json.JSONDecodeError) as exc:
+        logger.warning("Lightspeed eCom linked record failed: link=%s error=%s", link, exc)
+        return {}
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return payload
+
+
+def simplify_ecom_product(product: dict[str, Any], expand_links: bool = False) -> dict[str, Any]:
     brand = product.get("brand") or product.get("Brand")
-    brand_dict = first_nested_dict(brand, ("brand", "Brand"))
+    brand_dict = get_ecom_resource_record(brand, ("brand", "Brand")) if expand_links else first_nested_dict(brand, ("brand", "Brand"))
     variants = product.get("variants") or product.get("Variants") or product.get("variant")
     images = product.get("images") or product.get("Images") or product.get("image")
-    variant_dict = first_nested_dict(variants, ("variant", "Variant"))
+    variant_rows = get_ecom_resource_collection(variants, ("variants", "variant", "Variant")) if expand_links else []
+    image_rows = get_ecom_resource_collection(images, ("images", "image", "Image")) if expand_links else []
+    variant_dict = variant_rows[0] if variant_rows else first_nested_dict(variants, ("variant", "Variant"))
     return {
         "product_id": clean(product.get("id") or product.get("productID") or product.get("product_id")),
         "title": clean(product.get("title") or product.get("fulltitle") or product.get("name")),
@@ -756,8 +820,8 @@ def simplify_ecom_product(product: dict[str, Any]) -> dict[str, Any]:
         "price": clean(product.get("priceIncl") or product.get("priceExcl") or product.get("price") or variant_dict.get("priceIncl") or variant_dict.get("price")),
         "sku": clean(product.get("sku") or product.get("articleCode") or variant_dict.get("sku") or variant_dict.get("articleCode")),
         "ean_upc": clean(product.get("ean") or product.get("upc") or product.get("ean13") or variant_dict.get("ean") or variant_dict.get("upc")),
-        "variants_count": nested_count(variants, "variant"),
-        "images_count": nested_count(images, "image"),
+        "variants_count": len(variant_rows) if expand_links else nested_count(variants, "variant"),
+        "images_count": len(image_rows) if expand_links else nested_count(images, "image"),
         "updated_at": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
     }
 
@@ -2058,7 +2122,7 @@ def catalogue_ecom_test_page(x_remote_user: Optional[str] = Header(default=None,
             """,
         )
 
-    simplified = [simplify_ecom_product(product) for product in products]
+    simplified = [simplify_ecom_product(product, expand_links=True) for product in products]
     rows = "".join(
         f"""
         <tr>
