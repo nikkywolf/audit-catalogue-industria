@@ -12,7 +12,7 @@ import subprocess
 import secrets
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -1003,6 +1003,102 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
     return rows
 
 
+def ecom_product_datetime(product: dict[str, Any]) -> Optional[datetime]:
+    value = clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt") or product.get("createdAt"))
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def quick_ecom_audit_row(product: dict[str, Any]) -> dict[str, str]:
+    product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
+    return {
+        "Internal_ID": product_id_value,
+        "Internal_Variant_ID": product_id_value,
+        "Brand": "",
+        "FC_Title_Short": clean(product.get("title")),
+        "US_Title_Short": clean(product.get("title")),
+        "SKU": "",
+        "UPC": "",
+        "Visible": "Y" if str(product.get("isVisible")).lower() == "true" or clean(product.get("visibility")).lower() == "visible" else "N",
+        "Images": "",
+        "FC_Description_Short": clean(product.get("description")),
+        "FC_Description_Long": clean(product.get("content")),
+        "URL": clean(product.get("url")),
+        "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt") or product.get("createdAt")),
+        "needs_enrichment": "Y",
+    }
+
+
+def save_quick_ecom_product(conn: sqlite3.Connection, product: dict[str, Any], synced_at: str) -> bool:
+    row = quick_ecom_audit_row(product)
+    product_id_value = clean(row.get("Internal_ID"))
+    if not product_id_value:
+        return False
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO ecom_api_products
+        (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
+         mapped_payload, product_payload, variant_payload, enriched_at, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT enriched_at FROM ecom_api_products WHERE Internal_Variant_ID = ?), ''), ?)
+        """,
+        (
+            product_id_value,
+            product_id_value,
+            clean(row.get("Brand")),
+            clean(row.get("FC_Title_Short")),
+            clean(row.get("SKU")),
+            clean(row.get("UPC")),
+            clean(row.get("Visible")),
+            json.dumps(row, ensure_ascii=False),
+            json.dumps(product, ensure_ascii=False),
+            "{}",
+            product_id_value,
+            synced_at,
+        ),
+    )
+    return True
+
+
+def fetch_recent_ecom_products(hours: int = 24, scan_limit: int = 100) -> tuple[str, list[dict[str, Any]]]:
+    hours = max(1, min(int(hours), 720))
+    scan_limit = max(1, min(int(scan_limit), 250))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    url, raw_body = lightspeed_ecom_get_products_raw(scan_limit, 0)
+    payload = json.loads(raw_body)
+    products = extract_ecom_products(payload)
+    recent = []
+    for product in products:
+        product_date = ecom_product_datetime(product)
+        if product_date and product_date >= cutoff:
+            recent.append(product)
+    return url, recent
+
+
+def save_recent_ecom_products(hours: int = 24, scan_limit: int = 100) -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    url, products = fetch_recent_ecom_products(hours, scan_limit)
+    synced_at = now_text()
+    saved = 0
+    with connect() as conn:
+        for product in products:
+            if save_quick_ecom_product(conn, product, synced_at):
+                saved += 1
+    return {
+        "ok": True,
+        "url": url,
+        "recent_found": len(products),
+        "saved": saved,
+        "message": f"{len(products)} produit(s) récent(s) trouvé(s), {saved} sauvegardé(s) dans la table eCom API.",
+    }
+
+
 def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
     ensure_ecom_api_tables()
     limit = max(1, min(int(limit), 200))
@@ -1070,48 +1166,8 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
 
             with connect() as conn:
                 for product in products:
-                    product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
-                    if not product_id_value:
-                        continue
-                    quick_row = {
-                        "Internal_ID": product_id_value,
-                        "Internal_Variant_ID": product_id_value,
-                        "Brand": "",
-                        "FC_Title_Short": clean(product.get("title")),
-                        "US_Title_Short": clean(product.get("title")),
-                        "SKU": "",
-                        "UPC": "",
-                        "Visible": "Y" if str(product.get("isVisible")).lower() == "true" or clean(product.get("visibility")).lower() == "visible" else "N",
-                        "Images": "",
-                        "FC_Description_Short": clean(product.get("description")),
-                        "FC_Description_Long": clean(product.get("content")),
-                        "URL": clean(product.get("url")),
-                        "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
-                        "needs_enrichment": "Y",
-                    }
-                    conn.execute(
-                        """
-                        INSERT OR REPLACE INTO ecom_api_products
-                        (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
-                         mapped_payload, product_payload, variant_payload, enriched_at, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT enriched_at FROM ecom_api_products WHERE Internal_Variant_ID = ?), ''), ?)
-                        """,
-                        (
-                            product_id_value,
-                            product_id_value,
-                            "",
-                            clean(product.get("title")),
-                            "",
-                            "",
-                            clean(quick_row["Visible"]),
-                            json.dumps(quick_row, ensure_ascii=False),
-                            json.dumps(product, ensure_ascii=False),
-                            "{}",
-                            product_id_value,
-                            started_at,
-                        ),
-                    )
-                    variants_saved += 1
+                    if save_quick_ecom_product(conn, product, started_at):
+                        variants_saved += 1
             products_seen += len(products)
             offset += len(products)
             with connect() as conn:
@@ -2785,6 +2841,7 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
     ) or '<tr><td colspan="8" class="muted">Aucune ligne eCom API sauvegardée.</td></tr>'
     body = f"""
       <p class="muted">Synchronisation manuelle vers une table séparée. Ne modifie pas l'audit CSV actuel.</p>
+      <p><a href="/catalogue/ecom-recent">Voir les produits récents eCom</a></p>
       <p><strong>Lignes eCom API sauvegardées :</strong> {status["product_count"]}</p>
       <p><strong>Enrichies :</strong> {status["enriched_count"]} | <strong>À enrichir :</strong> {status["pending_enrichment_count"]}</p>
       <form action="/catalogue/ecom-api-sync" method="post">
@@ -2862,6 +2919,88 @@ async def catalogue_ecom_api_enrich_submit(
       <p><a href="/catalogue/ecom-map-test">Voir le mapping</a></p>
     """
     return diagnostic_page("Lightspeed eCom API - Enrichissement terminé", body)
+
+
+@app.get("/catalogue/ecom-recent")
+def catalogue_ecom_recent_page(
+    hours: int = 24,
+    scan_limit: int = 100,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    try:
+        url, products = fetch_recent_ecom_products(hours, scan_limit)
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom API - Produits récents", api_error_html(exc))
+    except Exception as exc:
+        return diagnostic_page(
+            "Lightspeed eCom API - Produits récents",
+            f'<div class="error">{html.escape(mask_sensitive_text_full(str(exc))[:2000])}</div>',
+        )
+    rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(clean(product.get("id")))}</td>
+          <td>{html.escape(clean(product.get("title")))}</td>
+          <td>{html.escape(clean(product.get("visibility") or product.get("isVisible")))}</td>
+          <td>{html.escape(clean(product.get("createdAt")))}</td>
+          <td>{html.escape(clean(product.get("updatedAt")))}</td>
+          <td>{html.escape(clean(product.get("url")))}</td>
+        </tr>
+        """
+        for product in products
+    ) or '<tr><td colspan="6" class="muted">Aucun produit récent trouvé dans le lot scanné.</td></tr>'
+    body = f"""
+      <p class="muted">Diagnostic léger. Utilise seulement la liste produits eCom, sans enrichissement lourd.</p>
+      <p class="muted">Endpoint : {html.escape(url)}</p>
+      <form action="/catalogue/ecom-recent" method="get">
+        <label>Heures :
+          <input name="hours" type="number" min="1" max="720" value="{hours}" />
+        </label>
+        <label>Produits à scanner :
+          <input name="scan_limit" type="number" min="1" max="250" value="{scan_limit}" />
+        </label>
+        <button type="submit">Voir les récents</button>
+      </form>
+      <form action="/catalogue/ecom-recent/save" method="post" style="margin-top: 12px;">
+        <input type="hidden" name="hours" value="{hours}" />
+        <input type="hidden" name="scan_limit" value="{scan_limit}" />
+        <button type="submit">Sauvegarder ces récents</button>
+      </form>
+      <h2>Produits récents trouvés : {len(products)}</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Titre</th><th>Visibilité</th><th>Créé</th><th>Modifié</th><th>URL</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    """
+    return diagnostic_page("Lightspeed eCom API - Produits récents", body)
+
+
+@app.post("/catalogue/ecom-recent/save")
+async def catalogue_ecom_recent_save(
+    request: Request,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    body_bytes = await request.body()
+    form = parse_qs(body_bytes.decode("utf-8", errors="replace"))
+    hours = int(clean((form.get("hours") or ["24"])[0]) or 24)
+    scan_limit = int(clean((form.get("scan_limit") or ["100"])[0]) or 100)
+    try:
+        result = save_recent_ecom_products(hours, scan_limit)
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom API - Produits récents", api_error_html(exc))
+    except Exception as exc:
+        return diagnostic_page(
+            "Lightspeed eCom API - Produits récents",
+            f'<div class="error">{html.escape(mask_sensitive_text_full(str(exc))[:2000])}</div>',
+        )
+    body = f"""
+      <p><strong>{html.escape(result["message"])}</strong></p>
+      <p><a href="/catalogue/ecom-recent?hours={hours}&scan_limit={scan_limit}">Retour aux produits récents</a></p>
+      <p><a href="/catalogue/ecom-api-sync">Voir la table eCom API</a></p>
+    """
+    return diagnostic_page("Lightspeed eCom API - Produits récents sauvegardés", body)
 
 
 @app.get("/api/bootstrap")
