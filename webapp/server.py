@@ -666,7 +666,7 @@ def get_lightspeed_price_levels() -> list[dict[str, str]]:
 
 
 def simplify_item_price_rows(item: dict[str, Any]) -> list[dict[str, str]]:
-    item_prices = item.get("ItemPrices") or {}
+    item_prices = item.get("Prices") or item.get("ItemPrices") or {}
     rows = item_prices.get("ItemPrice") if isinstance(item_prices, dict) else item_prices
     return [
         {
@@ -677,6 +677,13 @@ def simplify_item_price_rows(item: dict[str, Any]) -> list[dict[str, str]]:
         for row in as_list(rows)
         if isinstance(row, dict)
     ]
+
+
+def get_default_price_from_item(item: dict[str, Any]) -> str:
+    for row in simplify_item_price_rows(item):
+        if row["useType"].lower() == "default" or row["useTypeID"] == "1":
+            return row["amount"]
+    return ""
 
 
 def simplify_item_shop_rows(item: dict[str, Any]) -> list[dict[str, str]]:
@@ -748,7 +755,7 @@ def get_lightspeed_item_detail(item_id: str) -> dict[str, Any]:
     account_id = resolve_lightspeed_account_id()
     return lightspeed_rseries_get(
         f"/Account/{account_id}/Item/{item_id}.json",
-        params={"load_relations": json.dumps(["ItemPrices", "ItemShops"])},
+        params={"load_relations": json.dumps(["ItemShops"])},
     )
 
 
@@ -1742,26 +1749,6 @@ def lightspeed_items_test_page(
         for item in simple_items
     ) or '<tr><td colspan="7" class="muted">Aucun article retourné par Lightspeed.</td></tr>'
 
-    relation_error = ""
-    related_items: list[dict[str, Any]] = []
-    try:
-        related_items = get_lightspeed_items_with_inventory_relations(limit=10)
-    except HTTPException as exc:
-        relation_error = api_error_html(exc)
-
-    related_rows = "".join(
-        f"""
-        <tr>
-          <td>{html.escape(item["description"])}</td>
-          <td>{html.escape(item["upc"])}</td>
-          <td>{html.escape(item["customSku"])}</td>
-          <td><pre>{html.escape(json.dumps(item["ItemPrices"], ensure_ascii=False, indent=2))}</pre></td>
-          <td><pre>{html.escape(json.dumps(item["ItemShops"], ensure_ascii=False, indent=2))}</pre></td>
-        </tr>
-        """
-        for item in related_items
-    ) or '<tr><td colspan="5" class="muted">Relations non retournées ou aucun article.</td></tr>'
-
     detail_html = ""
     search_value = clean(item_id) or clean(upc)
     if search_value:
@@ -1775,20 +1762,52 @@ def lightspeed_items_test_page(
             raw_item = extract_first_record(raw_payload, "Item")
             item_prices = simplify_item_price_rows(raw_item)
             item_shops = simplify_item_shop_rows(raw_item)
+            default_price = get_default_price_from_item(raw_item)
+            selected_shop = clean(shop_id)
+            selected_stock = next((row for row in item_shops if row["shopID"] == selected_shop), {}) if selected_shop else {}
             price_rows = "".join(
                 f"<tr><td>{html.escape(row['amount'])}</td><td>{html.escape(row['useType'])}</td><td>{html.escape(row['useTypeID'])}</td></tr>"
                 for row in item_prices
-            ) or '<tr><td colspan="3" class="muted">Aucun ItemPrices retourné.</td></tr>'
+            ) or '<tr><td colspan="3" class="muted">Aucun prix retourné.</td></tr>'
             shop_rows = "".join(
                 f"<tr><td>{html.escape(row['shopID'])}</td><td>{html.escape(row['qoh'])}</td><td>{html.escape(row['sellable'])}</td></tr>"
                 for row in item_shops
             ) or '<tr><td colspan="3" class="muted">Aucun ItemShops retourné.</td></tr>'
+            selected_stock_html = ""
+            if selected_shop:
+                selected_stock_html = f"""
+                  <h3>Stock succursale sélectionnée</h3>
+                  <table>
+                    <thead><tr><th>shopID</th><th>qoh</th><th>sellable</th></tr></thead>
+                    <tbody>
+                      <tr>
+                        <td>{html.escape(selected_shop)}</td>
+                        <td>{html.escape(clean(selected_stock.get("qoh")))}</td>
+                        <td>{html.escape(clean(selected_stock.get("sellable")))}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                """
             detail_html = f"""
               <h2>Produit précis</h2>
-              <p class="muted">GET /Account/accountID/Item/{html.escape(resolved_item_id)}.json avec load_relations=ItemPrices,ItemShops</p>
+              <p class="muted">GET /Account/accountID/Item/{html.escape(resolved_item_id)}.json avec load_relations=ItemShops</p>
+              <h3>Valeurs retenues pour Google Merchant local</h3>
+              <table>
+                <thead><tr><th>itemID</th><th>description</th><th>UPC</th><th>SKU</th><th>Prix Default</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>{html.escape(resolved_item_id)}</td>
+                    <td>{html.escape(clean(raw_item.get("description")))}</td>
+                    <td>{html.escape(clean(raw_item.get("upc")))}</td>
+                    <td>{html.escape(clean(raw_item.get("customSku")))}</td>
+                    <td>{html.escape(default_price)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              {selected_stock_html}
               <h3>JSON brut complet masqué</h3>
               <pre style="white-space: pre-wrap;">{html.escape(mask_sensitive_text(json.dumps(raw_payload, ensure_ascii=False, indent=2)))}</pre>
-              <h3>ItemPrices</h3>
+              <h3>Prices</h3>
               <table>
                 <thead><tr><th>amount</th><th>useType</th><th>useTypeID</th></tr></thead>
                 <tbody>{price_rows}</tbody>
@@ -1820,15 +1839,6 @@ def lightspeed_items_test_page(
         <tbody>{simple_rows}</tbody>
       </table>
 
-      <h2>Étape 2 - Relations documentées</h2>
-      <p class="muted">load_relations = ItemPrices, ItemShops.</p>
-      {relation_error}
-      <table>
-        <thead>
-          <tr><th>description</th><th>UPC</th><th>customSku</th><th>ItemPrices amount/useType</th><th>ItemShops shopID/qoh/sellable</th></tr>
-        </thead>
-        <tbody>{related_rows}</tbody>
-      </table>
       {detail_html}
     """
     return diagnostic_page("Lightspeed R-Series - Test inventaire", body)
