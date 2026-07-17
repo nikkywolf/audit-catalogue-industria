@@ -21,7 +21,7 @@ import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -535,6 +535,41 @@ def lightspeed_rseries_get(path: str, params: Optional[dict[str, Any]] = None, r
             refresh_lightspeed_retail_token()
             return lightspeed_rseries_get(path, params=params, retry=False)
         logger.warning("Lightspeed R-Series API GET failed: endpoint=%s status=%s body=%s", endpoint, exc.code, body)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Lightspeed R-Series a refusé la requête.",
+                "endpoint": endpoint,
+                "status": exc.code,
+                "body": body,
+            },
+        ) from exc
+
+
+def lightspeed_rseries_get_raw(path: str, params: Optional[dict[str, Any]] = None, retry: bool = True) -> str:
+    endpoint = path if path.startswith("/") else f"/{path}"
+    query = f"?{urlencode(params or {})}" if params else ""
+    url = f"https://api.lightspeedapp.com/API/V3{endpoint}{query}"
+    token = get_valid_lightspeed_retail_token()
+    request = UrlRequest(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "IndustriaCatalogueAudit/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            return response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = mask_sensitive_text(exc.read().decode("utf-8", errors="replace"))
+        if exc.code == 401 and retry:
+            logger.info("Lightspeed R-Series token expired during raw API call; refreshing token.")
+            refresh_lightspeed_retail_token()
+            return lightspeed_rseries_get_raw(path, params=params, retry=False)
+        logger.warning("Lightspeed R-Series raw API GET failed: endpoint=%s status=%s body=%s", endpoint, exc.code, body)
         raise HTTPException(
             status_code=502,
             detail={
@@ -1797,6 +1832,20 @@ def lightspeed_items_test_page(
       {detail_html}
     """
     return diagnostic_page("Lightspeed R-Series - Test inventaire", body)
+
+
+@app.get("/lightspeed/item-raw/{itemID}")
+def lightspeed_item_raw_page(
+    itemID: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    account_id = resolve_lightspeed_account_id()
+    raw_body = lightspeed_rseries_get_raw(f"/Account/{account_id}/Item/{itemID}.json")
+    return Response(
+        content=mask_sensitive_text(raw_body),
+        media_type="application/json; charset=utf-8",
+    )
 
 
 @app.get("/api/bootstrap")
