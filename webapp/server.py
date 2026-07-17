@@ -3341,10 +3341,10 @@ def api_brands(search: str = ""):
 
     active = []
     ignored = []
-    for brand in sorted(counts):
+    for brand in sorted(set(counts) | processed_brands):
         if query and query not in brand.lower():
             continue
-        item = {"Brand": brand, "Produits": counts[brand]}
+        item = {"Brand": brand, "Produits": counts.get(brand, 0)}
         if brand in processed_brands:
             active.append(item)
         else:
@@ -3352,7 +3352,7 @@ def api_brands(search: str = ""):
     return {
         "active": active,
         "ignored": ignored,
-        "active_total": len([brand for brand in counts if brand in processed_brands]),
+        "active_total": len([brand for brand in set(counts) | processed_brands if brand in processed_brands]),
         "ignored_total": len([brand for brand in counts if brand not in processed_brands]),
     }
 

@@ -167,7 +167,7 @@ function renderBrandSummary(rows) {
 
 function renderSimpleTable(columns, rows) {
   return `
-    <table>
+    <table class="brand-table">
       <thead><tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead>
       <tbody>
         ${rows.map((row) => `

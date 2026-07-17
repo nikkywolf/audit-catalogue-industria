@@ -270,6 +270,16 @@ table {
   min-width: 980px;
 }
 
+.brand-table {
+  min-width: 0;
+}
+
+.brand-table th:last-child,
+.brand-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);
