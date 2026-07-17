@@ -1066,6 +1066,26 @@ def save_quick_ecom_product(conn: sqlite3.Connection, product: dict[str, Any], s
     return True
 
 
+def ecom_product_id(product: dict[str, Any]) -> str:
+    return clean(product.get("id") or product.get("productID") or product.get("product_id"))
+
+
+def current_export_product_ids() -> tuple[set[str], set[str]]:
+    products = load_products()
+    internal_ids = {product_internal_id(row) for row in products if product_internal_id(row)}
+    variant_ids = {product_id(row) for row in products if product_id(row)}
+    return internal_ids, variant_ids
+
+
+def product_is_missing_from_export(
+    product: dict[str, Any],
+    internal_ids: set[str],
+    variant_ids: set[str],
+) -> bool:
+    product_id_value = ecom_product_id(product)
+    return bool(product_id_value and product_id_value not in internal_ids and product_id_value not in variant_ids)
+
+
 def fetch_recent_ecom_products(hours: int = 24, scan_limit: int = 100) -> tuple[str, list[dict[str, Any]]]:
     hours = max(1, min(int(hours), 720))
     scan_limit = max(1, min(int(scan_limit), 250))
@@ -1084,18 +1104,28 @@ def fetch_recent_ecom_products(hours: int = 24, scan_limit: int = 100) -> tuple[
 def save_recent_ecom_products(hours: int = 24, scan_limit: int = 100) -> dict[str, Any]:
     ensure_ecom_api_tables()
     url, products = fetch_recent_ecom_products(hours, scan_limit)
+    internal_ids, variant_ids = current_export_product_ids()
     synced_at = now_text()
     saved = 0
+    skipped_existing = 0
     with connect() as conn:
         for product in products:
+            if not product_is_missing_from_export(product, internal_ids, variant_ids):
+                skipped_existing += 1
+                continue
             if save_quick_ecom_product(conn, product, synced_at):
                 saved += 1
     return {
         "ok": True,
         "url": url,
         "recent_found": len(products),
+        "skipped_existing": skipped_existing,
         "saved": saved,
-        "message": f"{len(products)} produit(s) récent(s) trouvé(s), {saved} sauvegardé(s) dans la table eCom API.",
+        "message": (
+            f"{len(products)} produit(s) récent(s) trouvé(s), "
+            f"{skipped_existing} déjà présent(s) dans l'export, "
+            f"{saved} nouveau(x) produit(s) sauvegardé(s)."
+        ),
     }
 
 
@@ -1126,7 +1156,9 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
 
     products_seen = 0
     variants_saved = 0
+    skipped_existing = 0
     offset = start_offset
+    internal_ids, variant_ids = current_export_product_ids()
     try:
         while products_seen < limit:
             batch_limit = min(page_size, limit - products_seen)
@@ -1155,6 +1187,7 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
                         "run_id": run_id,
                         "products_seen": products_seen,
                         "variants_saved": variants_saved,
+                        "skipped_existing": skipped_existing,
                         "next_offset": offset,
                         "message": message,
                     }
@@ -1166,6 +1199,9 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
 
             with connect() as conn:
                 for product in products:
+                    if not product_is_missing_from_export(product, internal_ids, variant_ids):
+                        skipped_existing += 1
+                        continue
                     if save_quick_ecom_product(conn, product, started_at):
                         variants_saved += 1
             products_seen += len(products)
@@ -1184,7 +1220,9 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
             time.sleep(1.5)
 
         message = (
-            f"Sync rapide: {products_seen} produit(s) lus, {variants_saved} ligne(s) sauvegardée(s). "
+            f"Sync API: {products_seen} produit(s) lus, "
+            f"{skipped_existing} déjà présent(s) dans l'export, "
+            f"{variants_saved} nouveau(x) produit(s) sauvegardé(s). "
             f"Prochain offset: {offset}."
         )
         with connect() as conn:
@@ -1201,6 +1239,7 @@ def sync_ecom_api_products(limit: int = 100) -> dict[str, Any]:
             "run_id": run_id,
             "products_seen": products_seen,
             "variants_saved": variants_saved,
+            "skipped_existing": skipped_existing,
             "next_offset": offset,
             "message": message,
         }
@@ -2816,7 +2855,7 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
             <tr><th>Offset départ</th><td>{html.escape(clean(latest.get("start_offset")))}</td></tr>
             <tr><th>Prochain offset</th><td>{html.escape(clean(latest.get("next_offset")))}</td></tr>
             <tr><th>Produits lus</th><td>{html.escape(clean(latest.get("products_seen")))}</td></tr>
-            <tr><th>Variantes sauvegardées</th><td>{html.escape(clean(latest.get("variants_saved")))}</td></tr>
+            <tr><th>Nouveaux produits sauvegardés</th><td>{html.escape(clean(latest.get("variants_saved")))}</td></tr>
             <tr><th>Message</th><td>{html.escape(clean(latest.get("message")))}</td></tr>
           </tbody>
         </table>
@@ -2840,15 +2879,15 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
         for row in status["rows"]
     ) or '<tr><td colspan="8" class="muted">Aucune ligne eCom API sauvegardée.</td></tr>'
     body = f"""
-      <p class="muted">Synchronisation manuelle vers une table séparée. Ne modifie pas l'audit CSV actuel.</p>
+      <p class="muted">Compare l'API eCom avec l'audit actuel et sauvegarde seulement les produits absents de l'export. L'audit existant reste inchangé.</p>
       <p><a href="/catalogue/ecom-recent">Voir les produits récents eCom</a></p>
-      <p><strong>Lignes eCom API sauvegardées :</strong> {status["product_count"]}</p>
+      <p><strong>Produits absents sauvegardés :</strong> {status["product_count"]}</p>
       <p><strong>Enrichies :</strong> {status["enriched_count"]} | <strong>À enrichir :</strong> {status["pending_enrichment_count"]}</p>
       <form action="/catalogue/ecom-api-sync" method="post">
         <label>Nombre de produits à lire :
           <input name="limit" type="number" min="1" max="200" value="100" />
         </label>
-        <button type="submit">Sync rapide eCom API</button>
+        <button type="submit">Trouver produits absents de l'export</button>
       </form>
       <form action="/catalogue/ecom-api-enrich" method="post" style="margin-top: 12px;">
         <label>Produits à enrichir :
@@ -2858,7 +2897,7 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
       </form>
       <h2>Dernière synchronisation</h2>
       {latest_html}
-      <h2>Dernières lignes sauvegardées</h2>
+      <h2>Derniers produits absents sauvegardés</h2>
       <table>
         <thead>
           <tr><th>Internal_ID</th><th>Internal_Variant_ID</th><th>Brand</th><th>Produit</th><th>SKU</th><th>UPC</th><th>Visible</th><th>Sync</th></tr>
@@ -2866,7 +2905,7 @@ def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=N
         <tbody>{rows_html}</tbody>
       </table>
     """
-    return diagnostic_page("Lightspeed eCom API - Sync séparée", body)
+    return diagnostic_page("Lightspeed eCom API - Produits absents de l'export", body)
 
 
 @app.post("/catalogue/ecom-api-sync")
@@ -2881,10 +2920,10 @@ async def catalogue_ecom_api_sync_submit(
     try:
         result = sync_ecom_api_products(limit)
     except HTTPException as exc:
-        return diagnostic_page("Lightspeed eCom API - Sync séparée", api_error_html(exc))
+        return diagnostic_page("Lightspeed eCom API - Produits absents de l'export", api_error_html(exc))
     except Exception as exc:
         return diagnostic_page(
-            "Lightspeed eCom API - Sync séparée",
+            "Lightspeed eCom API - Produits absents de l'export",
             f'<div class="error">{html.escape(mask_sensitive_text_full(str(exc))[:2000])}</div>',
         )
     body = f"""
@@ -2892,7 +2931,7 @@ async def catalogue_ecom_api_sync_submit(
       <p><a href="/catalogue/ecom-api-sync">Retour au statut eCom API</a></p>
       <p><a href="/catalogue/ecom-map-test">Voir le mapping</a></p>
     """
-    return diagnostic_page("Lightspeed eCom API - Sync terminée", body)
+    return diagnostic_page("Lightspeed eCom API - Recherche terminée", body)
 
 
 @app.post("/catalogue/ecom-api-enrich")
