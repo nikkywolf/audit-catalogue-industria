@@ -826,6 +826,99 @@ def simplify_ecom_product(product: dict[str, Any], expand_links: bool = False) -
     }
 
 
+def ecom_product_context(product: dict[str, Any]) -> dict[str, Any]:
+    brand = product.get("brand") or product.get("Brand")
+    variants = product.get("variants") or product.get("Variants") or product.get("variant")
+    images = product.get("images") or product.get("Images") or product.get("image")
+    return {
+        "brand": get_ecom_resource_record(brand, ("brand", "Brand")),
+        "variants": get_ecom_resource_collection(variants, ("variants", "variant", "Variant")),
+        "images": get_ecom_resource_collection(images, ("images", "image", "Image")),
+    }
+
+
+def image_url_from_ecom_image(image: dict[str, Any]) -> str:
+    return clean(
+        image.get("src")
+        or image.get("url")
+        or image.get("link")
+        or image.get("thumb")
+        or image.get("original")
+    )
+
+
+def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) -> list[dict[str, str]]:
+    product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
+    brand = context.get("brand") or {}
+    variants = context.get("variants") or [{}]
+    images = context.get("images") or []
+    image_urls = [url for image in images if (url := image_url_from_ecom_image(image))]
+    rows: list[dict[str, str]] = []
+    for variant in variants:
+        variant_id = clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")) or product_id_value
+        rows.append(
+            {
+                "Internal_ID": product_id_value,
+                "Internal_Variant_ID": variant_id,
+                "Brand": clean(brand.get("title") or brand.get("name") or product.get("brand")),
+                "FC_Title_Short": clean(product.get("title")),
+                "US_Title_Short": clean(product.get("title")),
+                "SKU": clean(variant.get("sku") or variant.get("articleCode") or product.get("sku")),
+                "UPC": clean(variant.get("ean") or variant.get("upc") or variant.get("ean13") or product.get("ean")),
+                "Visible": "Y" if str(product.get("isVisible")).lower() == "true" or clean(product.get("visibility")).lower() == "visible" else "N",
+                "Stock_Disable_Sold_Out": clean(variant.get("stockTracking") or variant.get("stockDisableSoldOut") or product.get("stockDisableSoldOut")),
+                "Images": " | ".join(image_urls),
+                "FC_Description_Short": clean(product.get("description")),
+                "FC_Description_Long": clean(product.get("content")),
+                "US_Description_Short": "",
+                "US_Description_Long": "",
+                "URL": clean(product.get("url")),
+                "Meta_Title": clean(product.get("metaTitle") or product.get("title")),
+                "Meta_Description": clean(product.get("metaDescription")),
+                "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
+            }
+        )
+    return rows
+
+
+def ecom_mapping_status(row: dict[str, str], field: str, source: str, required: bool = True) -> dict[str, str]:
+    value = clean(row.get(field))
+    if value:
+        status = "OK"
+    elif required:
+        status = "Manquant"
+    else:
+        status = "À confirmer"
+    return {
+        "field": field,
+        "value": value,
+        "source": source,
+        "status": status,
+    }
+
+
+ECOM_AUDIT_MAPPING_SOURCES = {
+    "Internal_ID": "product.id",
+    "Internal_Variant_ID": "variants[].id",
+    "Brand": "brand.link -> brand.title/name",
+    "FC_Title_Short": "product.title",
+    "US_Title_Short": "à confirmer: eCom FC seulement dans ce test",
+    "SKU": "variants[].sku/articleCode",
+    "UPC": "variants[].ean/upc",
+    "Visible": "product.isVisible / product.visibility",
+    "Stock_Disable_Sold_Out": "variants/product stock fields",
+    "Images": "images.link -> images[].src/url/thumb",
+    "FC_Description_Short": "product.description",
+    "FC_Description_Long": "product.content",
+    "US_Description_Short": "à confirmer: autre langue/API",
+    "US_Description_Long": "à confirmer: autre langue/API",
+    "URL": "product.url",
+    "Meta_Title": "product.metaTitle/title",
+    "Meta_Description": "product.metaDescription",
+    "Updated_At": "product.updatedAt",
+}
+
+
 def as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -2167,6 +2260,90 @@ def catalogue_ecom_test_page(x_remote_user: Optional[str] = Header(default=None,
       <pre style="white-space: pre-wrap;">{html.escape(mask_sensitive_text_full(raw_body))}</pre>
     """
     return diagnostic_page("Lightspeed eCom C-Series - Test catalogue", body)
+
+
+@app.get("/catalogue/ecom-map-test")
+def catalogue_ecom_map_test_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    try:
+        url, raw_body = lightspeed_ecom_get_products_test_raw()
+        payload = json.loads(raw_body)
+        products = extract_ecom_products(payload)[:10]
+    except HTTPException as exc:
+        return diagnostic_page("Lightspeed eCom C-Series - Mapping audit", api_error_html(exc))
+    except json.JSONDecodeError as exc:
+        return diagnostic_page(
+            "Lightspeed eCom C-Series - Mapping audit",
+            f'<div class="error">Réponse eCom non JSON: {html.escape(str(exc))}</div>',
+        )
+
+    candidate_rows: list[dict[str, str]] = []
+    status_rows: list[dict[str, str]] = []
+    required_fields = {
+        "Internal_ID",
+        "Internal_Variant_ID",
+        "Brand",
+        "FC_Title_Short",
+        "US_Title_Short",
+        "SKU",
+        "UPC",
+        "Visible",
+        "Images",
+        "FC_Description_Short",
+        "FC_Description_Long",
+    }
+    for product in products:
+        context = ecom_product_context(product)
+        rows = ecom_audit_candidate_rows(product, context)
+        candidate_rows.extend(rows[:3])
+        sample = rows[0] if rows else {}
+        for field, source in ECOM_AUDIT_MAPPING_SOURCES.items():
+            status_rows.append(ecom_mapping_status(sample, field, source, required=field in required_fields))
+
+    mapping_rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(row["field"])}</td>
+          <td>{html.escape(row["status"])}</td>
+          <td>{html.escape(row["source"])}</td>
+          <td>{html.escape(row["value"][:220])}</td>
+        </tr>
+        """
+        for row in status_rows
+    ) or '<tr><td colspan="4" class="muted">Aucun mapping à afficher.</td></tr>'
+
+    candidate_fields = [
+        "Internal_ID",
+        "Internal_Variant_ID",
+        "Brand",
+        "FC_Title_Short",
+        "US_Title_Short",
+        "SKU",
+        "UPC",
+        "Visible",
+        "Images",
+        "FC_Description_Short",
+        "FC_Description_Long",
+    ]
+    candidate_html_rows = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(clean(row.get(field))[:180])}</td>" for field in candidate_fields) + "</tr>"
+        for row in candidate_rows[:20]
+    ) or f'<tr><td colspan="{len(candidate_fields)}" class="muted">Aucune ligne candidate.</td></tr>'
+    body = f"""
+      <p class="muted">Diagnostic lecture seule. Aucun changement SQLite, aucun remplacement CSV.</p>
+      <p class="muted">Endpoint produits : {html.escape(url)}</p>
+      <h2>Statut des champs audit</h2>
+      <table>
+        <thead><tr><th>Champ audit</th><th>Statut</th><th>Source API</th><th>Exemple valeur</th></tr></thead>
+        <tbody>{mapping_rows}</tbody>
+      </table>
+      <h2>Lignes candidates au format audit</h2>
+      <table>
+        <thead><tr>{"".join(f"<th>{html.escape(field)}</th>" for field in candidate_fields)}</tr></thead>
+        <tbody>{candidate_html_rows}</tbody>
+      </table>
+    """
+    return diagnostic_page("Lightspeed eCom C-Series - Mapping audit", body)
 
 
 @app.get("/api/bootstrap")
