@@ -740,7 +740,9 @@ async function loadIntegrations() {
       item.expires ? `Expiration : ${item.expires}` : "",
     ].filter(Boolean).map((text) => `<div class="muted">${escapeHtml(text)}</div>`).join("");
     const action = item.id === "lightspeed_retail" && item.configured
-      ? `<a class="button-link" href="${escapeHtml(item.connect_url)}">Connecter mon compte</a>`
+      ? item.connected
+        ? `<button type="button" data-refresh-lightspeed-token>Renouveler le jeton</button>`
+        : `<a class="button-link" href="${escapeHtml(item.connect_url)}">Connecter mon compte</a>`
       : "";
     return `
       <div class="integration-card">
@@ -754,6 +756,13 @@ async function loadIntegrations() {
       </div>
     `;
   }).join("");
+  document.querySelectorAll("[data-refresh-lightspeed-token]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      await api("/api/integrations/lightspeed/refresh", { method: "POST" });
+      await loadIntegrations();
+    });
+  });
 }
 
 async function setup() {

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import html
+import logging
 import os
 import re
 import sqlite3
 import subprocess
 import secrets
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +47,7 @@ USERS = {
 }
 
 app = FastAPI(title="Industria Catalogue Audit")
+logger = logging.getLogger("industria.integrations")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://(.*\.shoplightspeed\.com|dashboardindustria\.com)",
@@ -208,6 +211,123 @@ def ensure_product_source_table() -> None:
         )
 
 
+def ensure_integration_tables() -> None:
+    with connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                provider TEXT NOT NULL,
+                state_hash TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used_at INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS integration_tokens (
+                provider TEXT PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                token_type TEXT DEFAULT '',
+                scope TEXT DEFAULT '',
+                expires_at INTEGER DEFAULT 0,
+                refresh_expires_at INTEGER DEFAULT 0,
+                account_id TEXT DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def hash_oauth_state(state: str) -> str:
+    return hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
+def save_oauth_state(provider: str, state: str, ttl_seconds: int = 600) -> None:
+    ensure_integration_tables()
+    now = int(time.time())
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM oauth_states WHERE provider = ? AND (expires_at < ? OR used_at > 0)",
+            (provider, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO oauth_states (provider, state_hash, created_at, expires_at, used_at)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (provider, hash_oauth_state(state), now, now + ttl_seconds),
+        )
+
+
+def consume_oauth_state(provider: str, state: str) -> bool:
+    ensure_integration_tables()
+    now = int(time.time())
+    state_hash = hash_oauth_state(state)
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT state_hash
+            FROM oauth_states
+            WHERE provider = ?
+              AND state_hash = ?
+              AND expires_at >= ?
+              AND used_at = 0
+            """,
+            (provider, state_hash, now),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE oauth_states SET used_at = ? WHERE provider = ? AND state_hash = ?",
+            (now, provider, state_hash),
+        )
+    return True
+
+
+def save_integration_token(provider: str, token: dict[str, Any]) -> None:
+    ensure_integration_tables()
+    now = int(time.time())
+    expires_at = now + max(0, int(token.get("expires_in") or 0))
+    refresh_expires_at = now + max(0, int(token.get("refresh_expires_in") or 0))
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO integration_tokens
+            (provider, access_token, refresh_token, token_type, scope, expires_at, refresh_expires_at, account_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                token_type = excluded.token_type,
+                scope = excluded.scope,
+                expires_at = excluded.expires_at,
+                refresh_expires_at = excluded.refresh_expires_at,
+                account_id = excluded.account_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                provider,
+                str(token.get("access_token") or ""),
+                str(token.get("refresh_token") or ""),
+                str(token.get("token_type") or "bearer"),
+                str(token.get("scope") or ""),
+                expires_at,
+                refresh_expires_at,
+                str(token.get("account_id") or token.get("accountID") or ""),
+                now_text(),
+            ),
+        )
+
+
+def load_integration_token(provider: str) -> Optional[sqlite3.Row]:
+    ensure_integration_tables()
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM integration_tokens WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+
+
 
 def current_user(x_remote_user: Optional[str] = Header(default=None)) -> dict[str, str]:
     username = (x_remote_user or "vero").lower()
@@ -227,27 +347,23 @@ def require_user(x_remote_user: Optional[str]) -> dict[str, str]:
     return current_user(x_remote_user)
 
 
+LIGHTSPEED_RSERIES_PROVIDER = "lightspeed_rseries"
+LIGHTSPEED_RSERIES_AUTHORIZE_URL = "https://cloud.lightspeedapp.com/auth/oauth/authorize"
+LIGHTSPEED_RSERIES_TOKEN_URL = "https://cloud.lightspeedapp.com/auth/oauth/token"
+
+
 def lightspeed_retail_config() -> dict[str, str]:
     return {
         "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", ""),
         "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", ""),
-        "redirect_uri": os.environ.get(
-            "LIGHTSPEED_REDIRECT_URI",
-            "https://dashboardindustria.com/lightspeed/callback",
-        ),
-        "scope": os.environ.get("LIGHTSPEED_SCOPE", "products:read offline_access"),
+        "redirect_uri": os.environ.get("LIGHTSPEED_REDIRECT_URI", ""),
+        "scope": os.environ.get("LIGHTSPEED_SCOPE", "item:read inventory:read"),
     }
 
 
 def lightspeed_retail_connected() -> bool:
-    return all(
-        os.environ.get(key)
-        for key in (
-            "LIGHTSPEED_RETAIL_ACCESS_TOKEN",
-            "LIGHTSPEED_RETAIL_REFRESH_TOKEN",
-            "LIGHTSPEED_RETAIL_DOMAIN_PREFIX",
-        )
-    )
+    token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
+    return bool(token and token["access_token"] and token["refresh_token"])
 
 
 def lightspeed_retail_auth_url() -> str:
@@ -256,8 +372,8 @@ def lightspeed_retail_auth_url() -> str:
         raise HTTPException(status_code=400, detail="Configuration Lightspeed Retail incomplète")
 
     state = secrets.token_urlsafe(24)
-    update_dotenv({"LIGHTSPEED_OAUTH_STATE": state})
-    return "https://secure.retail.lightspeed.app/connect?" + urlencode(
+    save_oauth_state(LIGHTSPEED_RSERIES_PROVIDER, state)
+    return LIGHTSPEED_RSERIES_AUTHORIZE_URL + "?" + urlencode(
         {
             "response_type": "code",
             "client_id": config["client_id"],
@@ -268,24 +384,34 @@ def lightspeed_retail_auth_url() -> str:
     )
 
 
-def exchange_lightspeed_retail_code(code: str, domain_prefix: str) -> dict[str, Any]:
+def encode_multipart_form_data(fields: dict[str, str]) -> tuple[bytes, str]:
+    boundary = "----IndustriaOAuth" + secrets.token_hex(16)
+    chunks = []
+    for key, value in fields.items():
+        chunks.append(f"--{boundary}")
+        chunks.append(f'Content-Disposition: form-data; name="{key}"')
+        chunks.append("")
+        chunks.append(str(value))
+    chunks.append(f"--{boundary}--")
+    chunks.append("")
+    return "\r\n".join(chunks).encode("utf-8"), f"multipart/form-data; boundary={boundary}"
+
+
+def request_lightspeed_retail_token(payload: dict[str, str]) -> dict[str, Any]:
     config = lightspeed_retail_config()
-    token_url = f"https://{domain_prefix}.retail.lightspeed.app/api/1.0/token"
-    body = urlencode(
+    body, content_type = encode_multipart_form_data(
         {
-            "code": code,
             "client_id": config["client_id"],
             "client_secret": config["client_secret"],
-            "grant_type": "authorization_code",
-            "redirect_uri": config["redirect_uri"],
+            **payload,
         }
-    ).encode("utf-8")
+    )
     request = UrlRequest(
-        token_url,
+        LIGHTSPEED_RSERIES_TOKEN_URL,
         data=body,
         headers={
             "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": content_type,
             "User-Agent": "IndustriaCatalogueAudit/1.0",
         },
         method="POST",
@@ -295,7 +421,43 @@ def exchange_lightspeed_retail_code(code: str, domain_prefix: str) -> dict[str, 
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise HTTPException(status_code=502, detail=f"Lightspeed a refusé le jeton: {detail}") from exc
+        logger.warning("Lightspeed R-Series OAuth token request failed: HTTP %s %s", exc.code, detail)
+        raise HTTPException(status_code=502, detail="Lightspeed a refusé la connexion OAuth.") from exc
+
+
+def exchange_lightspeed_retail_code(code: str) -> dict[str, Any]:
+    config = lightspeed_retail_config()
+    return request_lightspeed_retail_token(
+        {
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": config["redirect_uri"],
+        }
+    )
+
+
+def refresh_lightspeed_retail_token() -> dict[str, Any]:
+    token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
+    if not token or not token["refresh_token"]:
+        raise HTTPException(status_code=400, detail="Lightspeed Retail n'est pas connecté.")
+    refreshed = request_lightspeed_retail_token(
+        {
+            "refresh_token": token["refresh_token"],
+            "grant_type": "refresh_token",
+        }
+    )
+    save_integration_token(LIGHTSPEED_RSERIES_PROVIDER, refreshed)
+    return refreshed
+
+
+def get_valid_lightspeed_retail_token() -> str:
+    token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
+    if not token or not token["access_token"]:
+        raise HTTPException(status_code=400, detail="Lightspeed Retail n'est pas connecté.")
+    if token["expires_at"] and int(token["expires_at"]) <= int(time.time()) + 60:
+        refreshed = refresh_lightspeed_retail_token()
+        return str(refreshed.get("access_token") or "")
+    return str(token["access_token"])
 
 
 def clean(value: Any) -> str:
@@ -1019,6 +1181,7 @@ def api_me(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-U
 def api_integrations(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
     require_admin(x_remote_user)
     retail_config = lightspeed_retail_config()
+    retail_token = load_integration_token(LIGHTSPEED_RSERIES_PROVIDER)
     retail_missing = [
         label
         for label, value in (
@@ -1036,13 +1199,13 @@ def api_integrations(x_remote_user: Optional[str] = Header(default=None, alias="
         "items": [
             {
                 "id": "lightspeed_retail",
-                "name": "Lightspeed Retail",
+                "name": "Lightspeed Retail POS R-Series",
                 "connected": lightspeed_retail_connected(),
                 "configured": not retail_missing,
                 "missing": retail_missing,
-                "domain_prefix": os.environ.get("LIGHTSPEED_RETAIL_DOMAIN_PREFIX", ""),
-                "scope": os.environ.get("LIGHTSPEED_RETAIL_SCOPE", ""),
-                "expires": os.environ.get("LIGHTSPEED_RETAIL_EXPIRES", ""),
+                "domain_prefix": "",
+                "scope": retail_token["scope"] if retail_token else retail_config["scope"],
+                "expires": datetime.fromtimestamp(int(retail_token["expires_at"])).strftime("%Y-%m-%d %H:%M:%S") if retail_token and retail_token["expires_at"] else "",
                 "connect_url": "/lightspeed/connect",
             },
             {
@@ -1064,39 +1227,36 @@ def lightspeed_connect(x_remote_user: Optional[str] = Header(default=None, alias
     return RedirectResponse(lightspeed_retail_auth_url())
 
 
+@app.post("/api/integrations/lightspeed/refresh")
+def api_lightspeed_refresh(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
+    require_admin(x_remote_user)
+    refresh_lightspeed_retail_token()
+    return {"ok": True, "connected": True}
+
+
 @app.get("/lightspeed/callback")
 def lightspeed_callback(
     code: str = "",
-    domain_prefix: str = "",
     state: str = "",
     error: str = "",
 ):
     if error:
         return HTMLResponse(f"<h1>Connexion Lightspeed annulée</h1><p>{html.escape(error)}</p>", status_code=400)
-    if not code or not domain_prefix:
-        return HTMLResponse("<h1>Connexion Lightspeed incomplète</h1><p>Code ou domaine manquant.</p>", status_code=400)
-    expected_state = os.environ.get("LIGHTSPEED_OAUTH_STATE", "")
-    if not expected_state or state != expected_state:
+    if not code:
+        return HTMLResponse("<h1>Connexion Lightspeed incomplète</h1><p>Code OAuth manquant.</p>", status_code=400)
+    if not state or not consume_oauth_state(LIGHTSPEED_RSERIES_PROVIDER, state):
+        logger.warning("Lightspeed R-Series OAuth callback rejected because state was invalid or expired.")
         return HTMLResponse("<h1>Connexion Lightspeed refusée</h1><p>Validation de sécurité invalide.</p>", status_code=400)
 
-    token = exchange_lightspeed_retail_code(code, domain_prefix)
-    update_dotenv(
-        {
-            "LIGHTSPEED_RETAIL_ACCESS_TOKEN": str(token.get("access_token", "")),
-            "LIGHTSPEED_RETAIL_REFRESH_TOKEN": str(token.get("refresh_token", "")),
-            "LIGHTSPEED_RETAIL_DOMAIN_PREFIX": str(token.get("domain_prefix") or domain_prefix),
-            "LIGHTSPEED_RETAIL_SCOPE": str(token.get("scope", "")),
-            "LIGHTSPEED_RETAIL_EXPIRES": str(token.get("expires", "")),
-            "LIGHTSPEED_OAUTH_STATE": "",
-        }
-    )
+    token = exchange_lightspeed_retail_code(code)
+    save_integration_token(LIGHTSPEED_RSERIES_PROVIDER, token)
     return HTMLResponse(
         """
         <!doctype html>
         <html lang="fr">
           <head><meta charset="utf-8"><title>Lightspeed connecté</title></head>
           <body style="font-family: system-ui; padding: 32px;">
-            <h1>Lightspeed Retail est connecté.</h1>
+            <h1>Lightspeed Retail POS R-Series est connecté.</h1>
             <p>Tu peux retourner au Catalogue Audit.</p>
             <p><a href="/">Retour au dashboard</a></p>
           </body>
