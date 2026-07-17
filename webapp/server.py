@@ -809,13 +809,13 @@ def simplify_ecom_product(product: dict[str, Any], expand_links: bool = False) -
     variants = product.get("variants") or product.get("Variants") or product.get("variant")
     images = product.get("images") or product.get("Images") or product.get("image")
     variant_rows = get_ecom_resource_collection(variants, ("variants", "variant", "Variant")) if expand_links else []
-    image_rows = get_ecom_resource_collection(images, ("images", "image", "Image")) if expand_links else []
+    image_rows = get_ecom_resource_collection(images, ("productImages", "productImage", "images", "image", "Image")) if expand_links else []
     variant_dict = variant_rows[0] if variant_rows else first_nested_dict(variants, ("variant", "Variant"))
     return {
         "product_id": clean(product.get("id") or product.get("productID") or product.get("product_id")),
         "title": clean(product.get("title") or product.get("fulltitle") or product.get("name")),
         "visibility": clean(product.get("isVisible") or product.get("visible") or product.get("visibility")),
-        "brand": clean(brand_dict.get("title") or brand_dict.get("name") or brand_dict.get("id") or brand),
+        "brand": clean(brand_dict.get("title") or brand_dict.get("name") or brand_dict.get("id")),
         "url": clean(product.get("url") or product.get("urlPath") or product.get("fullUrl")),
         "price": clean(product.get("priceIncl") or product.get("priceExcl") or product.get("price") or variant_dict.get("priceIncl") or variant_dict.get("price")),
         "sku": clean(product.get("sku") or product.get("articleCode") or variant_dict.get("sku") or variant_dict.get("articleCode")),
@@ -833,7 +833,7 @@ def ecom_product_context(product: dict[str, Any]) -> dict[str, Any]:
     return {
         "brand": get_ecom_resource_record(brand, ("brand", "Brand")),
         "variants": get_ecom_resource_collection(variants, ("variants", "variant", "Variant")),
-        "images": get_ecom_resource_collection(images, ("images", "image", "Image")),
+        "images": get_ecom_resource_collection(images, ("productImages", "productImage", "images", "image", "Image")),
     }
 
 
@@ -853,6 +853,7 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
     variants = context.get("variants") or [{}]
     images = context.get("images") or []
     image_urls = [url for image in images if (url := image_url_from_ecom_image(image))]
+    brand_value = clean(brand.get("title") or brand.get("name") or brand.get("id"))
     rows: list[dict[str, str]] = []
     for variant in variants:
         variant_id = clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")) or product_id_value
@@ -860,7 +861,7 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
             {
                 "Internal_ID": product_id_value,
                 "Internal_Variant_ID": variant_id,
-                "Brand": clean(brand.get("title") or brand.get("name") or product.get("brand")),
+                "Brand": brand_value,
                 "FC_Title_Short": clean(product.get("title")),
                 "US_Title_Short": clean(product.get("title")),
                 "SKU": clean(variant.get("sku") or variant.get("articleCode") or product.get("sku")),
