@@ -350,6 +350,34 @@ def require_user(x_remote_user: Optional[str]) -> dict[str, str]:
 LIGHTSPEED_RSERIES_PROVIDER = "lightspeed_rseries"
 LIGHTSPEED_RSERIES_AUTHORIZE_URL = "https://cloud.lightspeedapp.com/auth/oauth/authorize"
 LIGHTSPEED_RSERIES_TOKEN_URL = "https://cloud.lightspeedapp.com/auth/oauth/token"
+SENSITIVE_OAUTH_FIELDS = ("client_secret", "access_token", "refresh_token", "code")
+
+
+class LightspeedTokenExchangeError(Exception):
+    def __init__(self, status_code: int, response_body: str, endpoint: str, parameter_names: list[str]):
+        self.status_code = status_code
+        self.response_body = response_body
+        self.endpoint = endpoint
+        self.parameter_names = parameter_names
+        super().__init__("Lightspeed token exchange failed")
+
+
+def mask_sensitive_text(text: str) -> str:
+    masked = text
+    for field in SENSITIVE_OAUTH_FIELDS:
+        masked = re.sub(
+            rf'("{field}"\s*:\s*")[^"]+(")',
+            rf'\1***\2',
+            masked,
+            flags=re.IGNORECASE,
+        )
+        masked = re.sub(
+            rf"({field}=)[^&\s]+",
+            rf"\1***",
+            masked,
+            flags=re.IGNORECASE,
+        )
+    return masked[:1000]
 
 
 def lightspeed_retail_config() -> dict[str, str]:
@@ -357,7 +385,7 @@ def lightspeed_retail_config() -> dict[str, str]:
         "client_id": os.environ.get("LIGHTSPEED_CLIENT_ID", "").strip(),
         "client_secret": os.environ.get("LIGHTSPEED_CLIENT_SECRET", "").strip(),
         "redirect_uri": os.environ.get("LIGHTSPEED_REDIRECT_URI", "").strip(),
-        "scope": "employee:inventory_read",
+        "scope": "employee:register employee:inventory",
     }
 
 
@@ -402,13 +430,12 @@ def encode_multipart_form_data(fields: dict[str, str]) -> tuple[bytes, str]:
 
 def request_lightspeed_retail_token(payload: dict[str, str]) -> dict[str, Any]:
     config = lightspeed_retail_config()
-    body, content_type = encode_multipart_form_data(
-        {
-            "client_id": config["client_id"],
-            "client_secret": config["client_secret"],
-            **payload,
-        }
-    )
+    fields = {
+        "client_id": config["client_id"],
+        "client_secret": config["client_secret"],
+        **payload,
+    }
+    body, content_type = encode_multipart_form_data(fields)
     request = UrlRequest(
         LIGHTSPEED_RSERIES_TOKEN_URL,
         data=body,
@@ -423,9 +450,21 @@ def request_lightspeed_retail_token(payload: dict[str, str]) -> dict[str, Any]:
         with urlopen(request, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        logger.warning("Lightspeed R-Series OAuth token request failed: HTTP %s %s", exc.code, detail)
-        raise HTTPException(status_code=502, detail="Lightspeed a refusé la connexion OAuth.") from exc
+        detail = mask_sensitive_text(exc.read().decode("utf-8", errors="replace"))
+        parameter_names = sorted(fields.keys())
+        logger.warning(
+            "Lightspeed R-Series OAuth token request failed: endpoint=%s status=%s params=%s body=%s",
+            LIGHTSPEED_RSERIES_TOKEN_URL,
+            exc.code,
+            ",".join(parameter_names),
+            detail,
+        )
+        raise LightspeedTokenExchangeError(
+            status_code=exc.code,
+            response_body=detail,
+            endpoint=LIGHTSPEED_RSERIES_TOKEN_URL,
+            parameter_names=parameter_names,
+        ) from exc
 
 
 def exchange_lightspeed_retail_code(code: str) -> dict[str, Any]:
@@ -1242,16 +1281,60 @@ def lightspeed_callback(
     code: str = "",
     state: str = "",
     error: str = "",
+    error_description: str = "",
+    error_uri: str = "",
 ):
+    callback_debug = {
+        "error": error or "",
+        "error_description": error_description or "",
+        "error_uri": error_uri or "",
+        "state_present": bool(state),
+        "code_present": bool(code),
+    }
+    logger.info("Lightspeed R-Series OAuth callback received: %s", callback_debug)
     if error:
-        return HTMLResponse(f"<h1>Connexion Lightspeed annulée</h1><p>{html.escape(error)}</p>", status_code=400)
+        return HTMLResponse(
+            f"""
+            <h1>Connexion Lightspeed refusée</h1>
+            <p><strong>error:</strong> {html.escape(error)}</p>
+            <p><strong>error_description:</strong> {html.escape(error_description or "")}</p>
+            <p><strong>error_uri:</strong> {html.escape(error_uri or "")}</p>
+            <p><strong>state reçu:</strong> {"oui" if state else "non"}</p>
+            <p><strong>code reçu:</strong> {"oui" if code else "non"}</p>
+            """,
+            status_code=400,
+        )
     if not code:
-        return HTMLResponse("<h1>Connexion Lightspeed incomplète</h1><p>Code OAuth manquant.</p>", status_code=400)
+        return HTMLResponse(
+            f"""
+            <h1>Connexion Lightspeed incomplète</h1>
+            <p>Code OAuth manquant.</p>
+            <p><strong>error:</strong> {html.escape(error or "")}</p>
+            <p><strong>error_description:</strong> {html.escape(error_description or "")}</p>
+            <p><strong>error_uri:</strong> {html.escape(error_uri or "")}</p>
+            <p><strong>state reçu:</strong> {"oui" if state else "non"}</p>
+            <p><strong>code reçu:</strong> non</p>
+            """,
+            status_code=400,
+        )
     if not state or not consume_oauth_state(LIGHTSPEED_RSERIES_PROVIDER, state):
         logger.warning("Lightspeed R-Series OAuth callback rejected because state was invalid or expired.")
         return HTMLResponse("<h1>Connexion Lightspeed refusée</h1><p>Validation de sécurité invalide.</p>", status_code=400)
 
-    token = exchange_lightspeed_retail_code(code)
+    try:
+        token = exchange_lightspeed_retail_code(code)
+    except LightspeedTokenExchangeError as exc:
+        return HTMLResponse(
+            f"""
+            <h1>Échec de l'échange du code Lightspeed</h1>
+            <p>Le code OAuth est présent, mais Lightspeed a refusé l'échange contre les jetons.</p>
+            <p><strong>Endpoint:</strong> {html.escape(exc.endpoint)}</p>
+            <p><strong>Statut HTTP:</strong> {exc.status_code}</p>
+            <p><strong>Paramètres envoyés:</strong> {html.escape(", ".join(exc.parameter_names))}</p>
+            <pre style="white-space: pre-wrap;">{html.escape(exc.response_body)}</pre>
+            """,
+            status_code=502,
+        )
     save_integration_token(LIGHTSPEED_RSERIES_PROVIDER, token)
     return HTMLResponse(
         """
