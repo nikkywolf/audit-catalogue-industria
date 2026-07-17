@@ -47,7 +47,7 @@ USERS = {
 }
 
 app = FastAPI(title="Industria Catalogue Audit")
-logger = logging.getLogger("industria.integrations")
+logger = logging.getLogger("uvicorn.error")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://(.*\.shoplightspeed\.com|dashboardindustria\.com)",
