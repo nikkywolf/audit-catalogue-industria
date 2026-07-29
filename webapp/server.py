@@ -1468,6 +1468,81 @@ def refresh_ecom_products_from_lightspeed(variant_ids: list[str], limit: int = 1
     }
 
 
+def rebuild_brand_summary_from_catalogue_report() -> None:
+    products = load_json_payload_table("catalogue_report")
+    summary = adjusted_brand_summary(products, set())
+    now = now_text()
+    with connect() as conn:
+        conn.execute("DELETE FROM brand_summary")
+        for row in summary:
+            brand = clean(row.get("Brand"))
+            if not brand:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO brand_summary
+                (Brand, payload, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (brand, json.dumps(row, ensure_ascii=False), now),
+            )
+
+
+def resync_ecom_products_to_catalogue_report(variant_ids: list[str], limit: int = 100) -> dict[str, Any]:
+    products = load_products()
+    product_map = {product_id(row): row for row in products}
+    selected_ids = [clean(variant_id) for variant_id in variant_ids if clean(variant_id)]
+    selected_ids = selected_ids[: max(1, min(int(limit), 100))]
+
+    product_ids: list[str] = []
+    seen_product_ids: set[str] = set()
+    for variant_id in selected_ids:
+        row = product_map.get(variant_id)
+        if not row:
+            continue
+        internal_id = product_internal_id(row)
+        if internal_id and internal_id not in seen_product_ids:
+            seen_product_ids.add(internal_id)
+            product_ids.append(internal_id)
+
+    synced_at = now_text()
+    products_refreshed = 0
+    variants_updated = 0
+    updated_variant_ids: set[str] = set()
+    for internal_id in product_ids:
+        product = lightspeed_ecom_get_product(internal_id)
+        save_enriched_ecom_product(product, synced_at)
+        context = ecom_product_context(product)
+        for mapped in ecom_audit_candidate_rows(product, context):
+            mapped.update(audit_product_row(mapped))
+            variant_id = product_id(mapped)
+            if not variant_id:
+                continue
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO catalogue_report
+                    (Internal_Variant_ID, payload, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (variant_id, json.dumps(mapped, ensure_ascii=False), synced_at),
+                )
+            updated_variant_ids.add(variant_id)
+            variants_updated += 1
+        products_refreshed += 1
+        time.sleep(1.5)
+
+    if variants_updated:
+        rebuild_brand_summary_from_catalogue_report()
+    return {
+        "ok": True,
+        "products_refreshed": products_refreshed,
+        "variants_updated": variants_updated,
+        "variant_ids": sorted(updated_variant_ids),
+        "message": f"{products_refreshed} fiche(s) relue(s), {variants_updated} variante(s) recalculée(s).",
+    }
+
+
 def latest_ecom_full_sync_status() -> dict[str, Any]:
     ensure_ecom_api_tables()
     with connect() as conn:
@@ -4277,7 +4352,7 @@ def api_gpt_batch_queue(
                         force_submit = 1,
                         updated_at = ?
                     WHERE Internal_Variant_ID = ?
-                      AND status IN ('pending', 'submitted', 'error', 'completed', 'approved')
+                      AND status IN ('pending', 'submitted', 'error', 'completed', 'approved', 'resynced')
                     """,
                     (now, summary["Internal_Variant_ID"]),
                 )
@@ -4654,6 +4729,78 @@ def api_gpt_batch_approve(
     return {"ok": True}
 
 
+@app.post("/api/gpt-batches/items/{variant_id}/mark-approved")
+def api_gpt_batch_mark_approved(
+    variant_id: str,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_user(x_remote_user)
+    ensure_batch_tables()
+    row = find_product(variant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Produit introuvable.")
+    summary = batch_item_summary(row)
+    now = now_text()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO gpt_batch_items
+            (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, status, force_submit, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'approved', 1, ?, ?)
+            ON CONFLICT(Internal_Variant_ID) DO UPDATE SET
+                Internal_ID = excluded.Internal_ID,
+                Brand = excluded.Brand,
+                Product_Title = excluded.Product_Title,
+                SKU = excluded.SKU,
+                status = 'approved',
+                force_submit = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                summary["Internal_Variant_ID"],
+                summary["Internal_ID"],
+                summary["Brand"],
+                summary["Product_Title"],
+                summary["SKU"],
+                now,
+                now,
+            ),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/gpt-batches/resync-approved")
+def api_gpt_batch_resync_approved(
+    payload: ProductSelectionPayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_batch_tables()
+    variant_ids = [clean(item) for item in payload.variant_ids if clean(item)]
+    if not variant_ids:
+        raise HTTPException(status_code=400, detail="Aucun produit sélectionné.")
+    result = resync_ecom_products_to_catalogue_report(variant_ids, payload.limit)
+    refreshed_ids = set(result.get("variant_ids") or [])
+    resynced_ids = [variant_id for variant_id in variant_ids if variant_id in refreshed_ids]
+    now = now_text()
+    with connect() as conn:
+        updated = 0
+        if resynced_ids:
+            placeholders = ",".join("?" for _ in resynced_ids)
+            updated = conn.execute(
+                f"""
+                UPDATE gpt_batch_items
+                SET status = 'resynced',
+                    updated_at = ?
+                WHERE status = 'approved'
+                  AND Internal_Variant_ID IN ({placeholders})
+                """,
+                [now, *resynced_ids],
+            ).rowcount
+    result["status_updated"] = int(updated or 0)
+    return result
+
+
 @app.post("/api/gpt-batches/items/{variant_id}/restore")
 def api_gpt_batch_restore(
     variant_id: str,
@@ -4667,7 +4814,7 @@ def api_gpt_batch_restore(
             UPDATE gpt_batch_items
             SET status = 'completed',
                 updated_at = ?
-            WHERE Internal_Variant_ID = ? AND status = 'approved'
+            WHERE Internal_Variant_ID = ? AND status IN ('approved', 'resynced')
             """,
             (now_text(), variant_id),
         )

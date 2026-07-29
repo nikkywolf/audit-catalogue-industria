@@ -15,6 +15,8 @@ const state = {
   batchPending: [],
   batchSubmitted: [],
   batchCompleted: [],
+  batchApproved: [],
+  batchResynced: [],
   syncedProducts: [],
   syncedProductsTotal: 0,
   batchCompletedSelectedIds: new Set(),
@@ -390,6 +392,13 @@ function renderProducts() {
       updateProductBatchSelectionUi();
     });
   });
+  document.querySelectorAll("[data-mark-batch-approved]").forEach((link) => {
+    link.addEventListener("click", () => {
+      api(`/api/gpt-batches/items/${encodeURIComponent(link.dataset.markBatchApproved)}/mark-approved`, {
+        method: "POST",
+      }).catch(() => {});
+    });
+  });
   const selectVisible = document.querySelector("[data-select-visible-products]");
   if (selectVisible) {
     selectVisible.addEventListener("change", () => {
@@ -411,7 +420,7 @@ function productRowHtml(row) {
     ? `<a class="product-link" href="${escapeHtml(row.Lightspeed_Admin_URL)}" target="_blank" rel="noopener noreferrer">${productName}</a>`
     : productName;
   const gptButton = canUseGpt() && buildAutofillLightspeedUrl(row)
-    ? `<a class="button-link" href="${escapeHtml(buildAutofillLightspeedUrl(row))}" target="_blank" rel="noopener noreferrer">Remplir avec GPT</a>`
+    ? `<a class="button-link" href="${escapeHtml(buildAutofillLightspeedUrl(row))}" target="_blank" rel="noopener noreferrer" data-mark-batch-approved="${escapeHtml(id)}">Remplir avec GPT</a>`
     : "";
   return `
     <tr>
@@ -838,12 +847,35 @@ async function loadBatchApproved() {
   const search = encodeURIComponent($("#batchApprovedSearch").value);
   const data = await api(`/api/gpt-batches/items?status=approved&search=${search}&limit=200`);
   state.batchApproved = data.items;
-  $("#batchApprovedTable").innerHTML = batchItemsTableHtml(data.items, `Approuvés : ${data.total}`, false, false, true);
+  $("#batchApprovedTable").innerHTML = batchItemsTableHtml(data.items, `Approuvés : ${data.total}`, false, true, true, "approved");
   document.querySelectorAll("[data-restore-batch]").forEach((button) => {
     button.addEventListener("click", async () => {
       await api(`/api/gpt-batches/items/${encodeURIComponent(button.dataset.restoreBatch)}/restore`, { method: "POST" });
       await loadBatchCompleted();
       await loadBatchApproved();
+    });
+  });
+  const selectAll = document.querySelector("[data-batch-select-all='approved']");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      document.querySelectorAll("[data-batch-select='approved']").forEach((checkbox) => {
+        checkbox.checked = selectAll.checked;
+      });
+    });
+  }
+}
+
+async function loadBatchResynced() {
+  const search = encodeURIComponent($("#batchResyncedSearch").value);
+  const data = await api(`/api/gpt-batches/items?status=resynced&search=${search}&limit=200`);
+  state.batchResynced = data.items;
+  $("#batchResyncedTable").innerHTML = batchItemsTableHtml(data.items, `Re-synchronisés : ${data.total}`, false, false, true);
+  document.querySelectorAll("[data-restore-batch]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/gpt-batches/items/${encodeURIComponent(button.dataset.restoreBatch)}/restore`, { method: "POST" });
+      await loadBatchCompleted();
+      await loadBatchApproved();
+      await loadBatchResynced();
     });
   });
 }
@@ -889,6 +921,7 @@ async function loadGptBatchPage() {
   await loadBatchSubmitted();
   await loadBatchCompleted();
   await loadBatchApproved();
+  await loadBatchResynced();
 }
 
 async function loadIntegrations() {
@@ -987,6 +1020,8 @@ async function setup() {
     $("#batchCompletedSearch").addEventListener("input", () => reloadBatchCompleted());
     const reloadBatchApproved = debounce(() => loadBatchApproved());
     $("#batchApprovedSearch").addEventListener("input", () => reloadBatchApproved());
+    const reloadBatchResynced = debounce(() => loadBatchResynced());
+    $("#batchResyncedSearch").addEventListener("input", () => reloadBatchResynced());
     $("#sendSelectedProductsBatch").addEventListener("click", async () => {
       const selectedIds = [...state.selectedProductIds];
       if (selectedIds.length === 0) {
@@ -1041,6 +1076,25 @@ async function setup() {
       await loadProducts();
       await loadBootstrap();
       await loadIgnored();
+    });
+    $("#resyncApprovedBatch").addEventListener("click", async () => {
+      const selectedIds = [...document.querySelectorAll("[data-batch-select='approved']:checked")].map((input) => input.value);
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit approuvé à re-synchroniser.");
+        return;
+      }
+      const ok = window.confirm(`Re-synchroniser ${selectedIds.length} produit(s) depuis Lightspeed eCom et recalculer leurs erreurs?`);
+      if (!ok) return;
+      const result = await api("/api/gpt-batches/resync-approved", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length }),
+      });
+      window.alert(result.message || "Produits re-synchronisés.");
+      state.loadedPages.clear();
+      await loadBootstrap();
+      await loadBatchApproved();
+      await loadBatchResynced();
+      await loadProducts();
     });
     $("#queueBatchCandidates").addEventListener("click", async () => {
       await api("/api/gpt-batches/queue", {

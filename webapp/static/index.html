@@ -127,9 +127,20 @@
         <section class="panel">
           <div class="panel-title">
             <h3>Produits batchs approuvés</h3>
-            <input id="batchApprovedSearch" type="search" placeholder="Recherche" />
+            <div class="toolbar">
+              <input id="batchApprovedSearch" type="search" placeholder="Recherche" />
+              <button id="resyncApprovedBatch">Re-synchroniser sélection</button>
+            </div>
           </div>
           <div id="batchApprovedTable" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits batchs re-synchronisés</h3>
+            <input id="batchResyncedSearch" type="search" placeholder="Recherche" />
+          </div>
+          <div id="batchResyncedTable" class="table-wrap"></div>
         </section>
       </section>
 
