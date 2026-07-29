@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Industria Audit</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260717-1325" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260729-1010" />
   </head>
   <body>
     <aside class="sidebar">
@@ -17,6 +17,7 @@
         <button class="nav" data-page="gptBatch">Batch GPT</button>
         <button class="nav" data-page="todos">To-Do List</button>
         <button id="ecomSyncButton" class="sync-menu admin-only" type="button">Synchronisation</button>
+        <button class="nav admin-only" data-page="syncedProducts">Derniers synchronisés</button>
         <button class="nav admin-only" data-page="integrations">Intégrations</button>
         <button class="nav" data-page="admin">Admin</button>
       </nav>
@@ -147,6 +148,27 @@
         </section>
       </section>
 
+      <section id="syncedProducts" class="page admin-only">
+        <div class="page-title">
+          <h2>Derniers produits synchronisés</h2>
+        </div>
+        <section class="panel">
+          <div class="panel-title">
+            <h3>Produits ajoutés par l'API eCom</h3>
+            <div class="toolbar">
+              <input id="syncedProductSearch" type="search" placeholder="Recherche produit, marque, SKU ou UPC" />
+              <select id="syncedProductLimit">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+              </select>
+            </div>
+          </div>
+          <div id="syncedProductsTable" class="table-wrap"></div>
+        </section>
+      </section>
+
       <section id="integrations" class="page admin-only">
         <div class="page-title">
           <h2>Intégrations</h2>
@@ -183,6 +205,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260717-1325"></script>
+    <script src="/static/app.js?v=20260729-1010"></script>
   </body>
 </html>

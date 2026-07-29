@@ -15,6 +15,8 @@ const state = {
   batchPending: [],
   batchSubmitted: [],
   batchCompleted: [],
+  syncedProducts: [],
+  syncedProductsTotal: 0,
   batchCompletedSelectedIds: new Set(),
   selectedProductIds: new Set(),
   productRequestId: 0,
@@ -72,6 +74,8 @@ async function loadPageData(pageId, force = false) {
     await loadBrandsAdmin();
   } else if (pageId === "integrations" && isAdmin()) {
     await loadIntegrations();
+  } else if (pageId === "syncedProducts" && isAdmin()) {
+    await loadSyncedProducts();
   } else if (pageId === "gptBatch" && canUseGpt()) {
     await loadGptBatchPage();
   }
@@ -135,6 +139,7 @@ async function runEcomSyncMissing() {
     window.alert(result.message || "Synchronisation terminée.");
     state.loadedPages.delete("overview");
     state.loadedPages.delete("errors");
+    state.loadedPages.delete("syncedProducts");
     await loadBootstrap();
     const activePage = document.querySelector(".page.active");
     if (activePage) {
@@ -144,6 +149,43 @@ async function runEcomSyncMissing() {
     button.disabled = false;
     button.textContent = originalText;
   }
+}
+
+async function loadSyncedProducts() {
+  const search = encodeURIComponent($("#syncedProductSearch").value);
+  const limit = encodeURIComponent($("#syncedProductLimit").value);
+  const data = await api(`/api/ecom/synced-products?search=${search}&limit=${limit}`);
+  state.syncedProducts = data.items;
+  state.syncedProductsTotal = data.total;
+  renderSyncedProducts();
+}
+
+function renderSyncedProducts() {
+  $("#syncedProductsTable").innerHTML = `
+    <div class="muted table-count">Produits synchronisés affichés : ${state.syncedProductsTotal}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Sync</th><th>Marque</th><th>Produit</th><th>SKU</th><th>UPC</th><th>Visible</th><th>ID eCom</th><th>URL</th><th>Enrichi</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${state.syncedProducts.map((item) => `
+          <tr>
+            <td>${escapeHtml(item.synced_at)}</td>
+            <td><strong>${escapeHtml(item.Brand)}</strong></td>
+            <td>${escapeHtml(item.Product_Title)}</td>
+            <td>${escapeHtml(item.SKU)}</td>
+            <td>${escapeHtml(item.UPC)}</td>
+            <td>${escapeHtml(item.Visible)}</td>
+            <td>${escapeHtml(item.Internal_ID)}</td>
+            <td>${escapeHtml(item.URL)}</td>
+            <td>${escapeHtml(item.enriched_at ? "Oui" : "Non")}</td>
+          </tr>
+        `).join("") || '<tr><td colspan="9" class="muted">Aucun produit synchronisé pour le moment.</td></tr>'}
+      </tbody>
+    </table>
+  `;
 }
 
 function isAdmin() {
@@ -825,6 +867,9 @@ async function setup() {
     window.alert(error.message || "La synchronisation a échoué.");
     loadBootstrap();
   }));
+  const reloadSyncedProducts = debounce(() => loadSyncedProducts());
+  $("#syncedProductSearch").addEventListener("input", () => reloadSyncedProducts());
+  $("#syncedProductLimit").addEventListener("input", () => reloadSyncedProducts());
 
   if (canUseGpt()) {
     const reloadBatchCandidates = debounce(() => loadBatchCandidates());

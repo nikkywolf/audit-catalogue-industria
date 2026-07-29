@@ -2840,6 +2840,46 @@ def ecom_api_sync_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api/ecom/synced-products")
+def api_ecom_synced_products(
+    search: str = "",
+    limit: int = 100,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_ecom_api_tables()
+    limit = max(1, min(int(limit), 500))
+    query = clean(search).lower()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT Internal_ID, Internal_Variant_ID, Brand, Product_Title, SKU, UPC, Visible,
+                   enriched_at, synced_at, mapped_payload
+            FROM ecom_api_products
+            ORDER BY synced_at DESC, Brand, Product_Title
+            LIMIT 1000
+            """
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            mapped = json.loads(item.pop("mapped_payload") or "{}")
+        except json.JSONDecodeError:
+            mapped = {}
+        item["URL"] = clean(mapped.get("URL"))
+        haystack = " ".join(
+            clean(item.get(key))
+            for key in ("Internal_ID", "Internal_Variant_ID", "Brand", "Product_Title", "SKU", "UPC", "URL")
+        ).lower()
+        if query and query not in haystack:
+            continue
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return {"items": items, "total": len(items)}
+
+
 @app.get("/catalogue/ecom-api-sync")
 def catalogue_ecom_api_sync_page(x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User")):
     require_admin(x_remote_user)
