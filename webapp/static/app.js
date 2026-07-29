@@ -151,6 +151,32 @@ async function runEcomSyncMissing() {
   }
 }
 
+async function runEcomEnrich() {
+  const button = $("#ecomEnrichButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Enrichissement...";
+  $("#syncBox").textContent = "Enrichissement des nouveaux produits eCom...";
+  try {
+    const result = await api("/api/ecom/enrich", {
+      method: "POST",
+      body: JSON.stringify({ limit: 10 }),
+    });
+    window.alert(result.message || "Enrichissement terminé.");
+    state.loadedPages.delete("overview");
+    state.loadedPages.delete("errors");
+    state.loadedPages.delete("syncedProducts");
+    await loadBootstrap();
+    const activePage = document.querySelector(".page.active");
+    if (activePage) {
+      await loadPageData(activePage.id, true);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 async function loadSyncedProducts() {
   const search = encodeURIComponent($("#syncedProductSearch").value);
   const limit = encodeURIComponent($("#syncedProductLimit").value);
@@ -866,6 +892,10 @@ async function setup() {
   $("#refreshIntegrations").addEventListener("click", () => loadIntegrations());
   $("#ecomSyncButton").addEventListener("click", () => runEcomSyncMissing().catch((error) => {
     window.alert(error.message || "La synchronisation a échoué.");
+    loadBootstrap();
+  }));
+  $("#ecomEnrichButton").addEventListener("click", () => runEcomEnrich().catch((error) => {
+    window.alert(error.message || "L'enrichissement a échoué.");
     loadBootstrap();
   }));
   const reloadSyncedProducts = debounce(() => loadSyncedProducts());

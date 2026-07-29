@@ -3041,6 +3041,18 @@ async def api_ecom_sync_missing(
     return sync_ecom_api_products(limit)
 
 
+@app.post("/api/ecom/enrich")
+async def api_ecom_enrich(
+    payload: Optional[dict[str, Any]] = None,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    limit = 10
+    if isinstance(payload, dict):
+        limit = int(clean(payload.get("limit")) or 10)
+    return enrich_ecom_api_products(limit)
+
+
 @app.post("/catalogue/ecom-api-enrich")
 async def catalogue_ecom_api_enrich_submit(
     request: Request,
