@@ -884,6 +884,12 @@ def simplify_ecom_product(product: dict[str, Any], expand_links: bool = False) -
     }
 
 
+def ecom_brand_name(product: dict[str, Any]) -> str:
+    brand = product.get("brand") or product.get("Brand")
+    brand_dict = get_ecom_resource_record(brand, ("brand", "Brand"))
+    return clean(brand_dict.get("title") or brand_dict.get("name") or brand_dict.get("id"))
+
+
 def ecom_product_context(product: dict[str, Any]) -> dict[str, Any]:
     brand = product.get("brand") or product.get("Brand")
     variants = product.get("variants") or product.get("Variants") or product.get("variant")
@@ -1018,10 +1024,11 @@ def ecom_product_datetime(product: dict[str, Any]) -> Optional[datetime]:
 
 def quick_ecom_audit_row(product: dict[str, Any]) -> dict[str, str]:
     product_id_value = clean(product.get("id") or product.get("productID") or product.get("product_id"))
+    brand = ecom_brand_name(product)
     return {
         "Internal_ID": product_id_value,
         "Internal_Variant_ID": product_id_value,
-        "Brand": "",
+        "Brand": brand,
         "FC_Title_Short": clean(product.get("title")),
         "US_Title_Short": clean(product.get("title")),
         "SKU": "",
@@ -1041,6 +1048,7 @@ def save_quick_ecom_product(conn: sqlite3.Connection, product: dict[str, Any], s
     product_id_value = clean(row.get("Internal_ID"))
     if not product_id_value:
         return False
+    brand = clean(row.get("Brand"))
     conn.execute(
         """
         INSERT OR REPLACE INTO ecom_api_products
@@ -1051,7 +1059,7 @@ def save_quick_ecom_product(conn: sqlite3.Connection, product: dict[str, Any], s
         (
             product_id_value,
             product_id_value,
-            clean(row.get("Brand")),
+            brand,
             clean(row.get("FC_Title_Short")),
             clean(row.get("SKU")),
             clean(row.get("UPC")),
@@ -1063,6 +1071,8 @@ def save_quick_ecom_product(conn: sqlite3.Connection, product: dict[str, Any], s
             synced_at,
         ),
     )
+    if brand:
+        conn.execute("INSERT OR IGNORE INTO brand_settings (Brand) VALUES (?)", (brand,))
     return True
 
 
@@ -1296,6 +1306,7 @@ def enrich_ecom_api_products(limit: int = 10) -> dict[str, Any]:
                 variant_id = clean(mapped.get("Internal_Variant_ID"))
                 if not variant_id:
                     continue
+                brand = clean(mapped.get("Brand"))
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO ecom_api_products
@@ -1306,7 +1317,7 @@ def enrich_ecom_api_products(limit: int = 10) -> dict[str, Any]:
                     (
                         variant_id,
                         clean(mapped.get("Internal_ID")),
-                        clean(mapped.get("Brand")),
+                        brand,
                         clean(mapped.get("FC_Title_Short")),
                         clean(mapped.get("SKU")),
                         clean(mapped.get("UPC")),
@@ -1318,6 +1329,8 @@ def enrich_ecom_api_products(limit: int = 10) -> dict[str, Any]:
                         enriched_at,
                     ),
                 )
+                if brand:
+                    conn.execute("INSERT OR IGNORE INTO brand_settings (Brand) VALUES (?)", (brand,))
                 variants_saved += 1
         products_seen += 1
         time.sleep(1.5)
@@ -2840,6 +2853,47 @@ def ecom_api_sync_status() -> dict[str, Any]:
     }
 
 
+def backfill_ecom_synced_brands(limit: int = 25) -> int:
+    ensure_ecom_api_tables()
+    updated = 0
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT Internal_Variant_ID, product_payload, mapped_payload
+            FROM ecom_api_products
+            WHERE COALESCE(Brand, '') = ''
+            ORDER BY synced_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    for row in rows:
+        try:
+            product = json.loads(row["product_payload"] or "{}")
+            mapped = json.loads(row["mapped_payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(product, dict) or not isinstance(mapped, dict):
+            continue
+        brand = ecom_brand_name(product)
+        if not brand:
+            continue
+        mapped["Brand"] = brand
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE ecom_api_products
+                SET Brand = ?, mapped_payload = ?
+                WHERE Internal_Variant_ID = ?
+                """,
+                (brand, json.dumps(mapped, ensure_ascii=False), row["Internal_Variant_ID"]),
+            )
+            conn.execute("INSERT OR IGNORE INTO brand_settings (Brand) VALUES (?)", (brand,))
+        updated += 1
+        time.sleep(0.4)
+    return updated
+
+
 @app.get("/api/ecom/synced-products")
 def api_ecom_synced_products(
     search: str = "",
@@ -2848,6 +2902,7 @@ def api_ecom_synced_products(
 ):
     require_admin(x_remote_user)
     ensure_ecom_api_tables()
+    backfilled = backfill_ecom_synced_brands()
     limit = max(1, min(int(limit), 500))
     query = clean(search).lower()
     with connect() as conn:
@@ -2877,7 +2932,7 @@ def api_ecom_synced_products(
         items.append(item)
         if len(items) >= limit:
             break
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": len(items), "backfilled_brands": backfilled}
 
 
 @app.get("/catalogue/ecom-api-sync")

@@ -157,12 +157,13 @@ async function loadSyncedProducts() {
   const data = await api(`/api/ecom/synced-products?search=${search}&limit=${limit}`);
   state.syncedProducts = data.items;
   state.syncedProductsTotal = data.total;
-  renderSyncedProducts();
+  renderSyncedProducts(data.backfilled_brands || 0);
 }
 
-function renderSyncedProducts() {
+function renderSyncedProducts(backfilledBrands = 0) {
   $("#syncedProductsTable").innerHTML = `
     <div class="muted table-count">Produits synchronisés affichés : ${state.syncedProductsTotal}</div>
+    ${backfilledBrands ? `<div class="muted table-count">${backfilledBrands} marque(s) récupérée(s) automatiquement.</div>` : ""}
     <table>
       <thead>
         <tr>
