@@ -135,6 +135,11 @@ class ProductSourcePayload(BaseModel):
     source_url: str = ""
 
 
+class ProductSelectionPayload(BaseModel):
+    variant_ids: list[str] = []
+    limit: int = 100
+
+
 class BatchQueuePayload(BaseModel):
     variant_ids: list[str] = []
     limit: int = 50
@@ -772,6 +777,35 @@ def lightspeed_ecom_get_products_raw(limit: int, offset: int) -> tuple[str, str]
     raise HTTPException(status_code=502, detail="Aucun endpoint eCom testé.")
 
 
+def lightspeed_ecom_get_product(product_id_value: str) -> dict[str, Any]:
+    product_id_value = clean(product_id_value)
+    if not product_id_value:
+        raise HTTPException(status_code=400, detail="Product ID eCom manquant.")
+    endpoints = []
+    for endpoint in lightspeed_ecom_candidate_endpoints():
+        base = endpoint.removesuffix(".json").removesuffix("/products")
+        candidate = f"{base}/products/{product_id_value}.json"
+        if candidate not in endpoints:
+            endpoints.append(candidate)
+    last_error: HTTPException | None = None
+    for endpoint in endpoints:
+        try:
+            payload = lightspeed_ecom_get_json(endpoint)
+        except HTTPException as exc:
+            last_error = exc
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            body = str(detail.get("body", ""))
+            if "Unknown or inactive language" not in body and "Object of type" not in body:
+                raise
+            continue
+        product = payload.get("product") or payload.get("Product") or payload.get("data") or payload
+        if isinstance(product, dict):
+            return product
+    if last_error:
+        raise last_error
+    raise HTTPException(status_code=502, detail="Produit eCom introuvable.")
+
+
 def resource_link(value: Any) -> str:
     if isinstance(value, dict):
         link = value.get("link")
@@ -1342,6 +1376,85 @@ def enrich_ecom_api_products(limit: int = 10) -> dict[str, Any]:
     }
 
 
+def save_enriched_ecom_product(product: dict[str, Any], synced_at: str) -> int:
+    context = ecom_product_context(product)
+    mapped_rows = ecom_audit_candidate_rows(product, context)
+    variants_by_id = {
+        clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")): variant
+        for variant in context.get("variants", [])
+        if isinstance(variant, dict)
+    }
+    product_id_value = ecom_product_id(product)
+    saved = 0
+    with connect() as conn:
+        if product_id_value:
+            conn.execute("DELETE FROM ecom_api_products WHERE Internal_ID = ?", (product_id_value,))
+        for mapped in mapped_rows:
+            mapped.update(audit_product_row(mapped))
+            variant_id = clean(mapped.get("Internal_Variant_ID"))
+            if not variant_id:
+                continue
+            brand = clean(mapped.get("Brand"))
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO ecom_api_products
+                (Internal_Variant_ID, Internal_ID, Brand, Product_Title, SKU, UPC, Visible,
+                 mapped_payload, product_payload, variant_payload, enriched_at, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    variant_id,
+                    clean(mapped.get("Internal_ID")),
+                    brand,
+                    clean(mapped.get("FC_Title_Short")),
+                    clean(mapped.get("SKU")),
+                    clean(mapped.get("UPC")),
+                    clean(mapped.get("Visible")),
+                    json.dumps(mapped, ensure_ascii=False),
+                    json.dumps(product, ensure_ascii=False),
+                    json.dumps(variants_by_id.get(variant_id, {}), ensure_ascii=False),
+                    synced_at,
+                    synced_at,
+                ),
+            )
+            if brand:
+                conn.execute("INSERT OR IGNORE INTO brand_settings (Brand) VALUES (?)", (brand,))
+            saved += 1
+    return saved
+
+
+def refresh_ecom_products_from_lightspeed(variant_ids: list[str], limit: int = 100) -> dict[str, Any]:
+    products = load_products()
+    product_map = {product_id(row): row for row in products}
+    selected_ids = [clean(variant_id) for variant_id in variant_ids if clean(variant_id)]
+    selected_ids = selected_ids[: max(1, min(int(limit), 100))]
+    product_ids: list[str] = []
+    seen: set[str] = set()
+    for variant_id in selected_ids:
+        row = product_map.get(variant_id)
+        if not row:
+            continue
+        internal_id = product_internal_id(row)
+        if internal_id and internal_id not in seen:
+            seen.add(internal_id)
+            product_ids.append(internal_id)
+
+    refreshed = 0
+    variants_saved = 0
+    synced_at = now_text()
+    for internal_id in product_ids:
+        product = lightspeed_ecom_get_product(internal_id)
+        variants_saved += save_enriched_ecom_product(product, synced_at)
+        refreshed += 1
+        time.sleep(1.5)
+    return {
+        "ok": True,
+        "products_refreshed": refreshed,
+        "variants_saved": variants_saved,
+        "message": f"{refreshed} fiche(s) relue(s) dans Lightspeed, {variants_saved} variante(s) mise(s) à jour.",
+    }
+
+
 def ecom_mapping_status(row: dict[str, str], field: str, source: str, required: bool = True) -> dict[str, str]:
     value = clean(row.get(field))
     if value:
@@ -1881,18 +1994,19 @@ def load_ecom_api_products() -> list[dict[str, Any]]:
 
 def load_products() -> list[dict[str, Any]]:
     export_products = load_export_products()
-    export_variant_ids = {product_id(row) for row in export_products if product_id(row)}
-    export_internal_ids = {product_internal_id(row) for row in export_products if product_internal_id(row)}
-    api_products = []
-    for row in load_ecom_api_products():
+    api_products = load_ecom_api_products()
+    api_variant_ids = {product_id(row) for row in api_products if product_id(row)}
+    api_internal_ids = {product_internal_id(row) for row in api_products if product_internal_id(row)}
+    filtered_export_products = []
+    for row in export_products:
         variant_id = product_id(row)
         internal_id = product_internal_id(row)
-        if variant_id and variant_id in export_variant_ids:
+        if variant_id and variant_id in api_variant_ids:
             continue
-        if internal_id and internal_id in export_internal_ids:
+        if internal_id and internal_id in api_internal_ids:
             continue
-        api_products.append(row)
-    return export_products + api_products
+        filtered_export_products.append(row)
+    return filtered_export_products + api_products
 
 
 def load_brand_summary() -> list[dict[str, Any]]:
@@ -3509,6 +3623,17 @@ def api_products(
     for item in page:
         item["Infos produit"] = "Oui" if item["Internal_Variant_ID"] in source_ids else "Non"
     return {"total": len(filtered), "items": page}
+
+
+@app.post("/api/products/refresh-ecom")
+def api_refresh_ecom_products(
+    payload: ProductSelectionPayload,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    if not payload.variant_ids:
+        raise HTTPException(status_code=400, detail="Aucun produit sélectionné.")
+    return refresh_ecom_products_from_lightspeed(payload.variant_ids, payload.limit)
 
 
 @app.get("/api/products/{variant_id}")

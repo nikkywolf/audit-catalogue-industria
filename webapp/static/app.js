@@ -292,10 +292,12 @@ function updateProductBatchSelectionUi() {
   const button = $("#sendSelectedProductsBatch");
   const approveButton = $("#approveSelectedErrors");
   const ignoreButton = $("#ignoreSelectedProducts");
+  const refreshButton = $("#refreshSelectedProducts");
   const count = $("#selectedProductsCount");
   if (button) button.disabled = selectedCount === 0;
   if (approveButton) approveButton.disabled = selectedCount === 0;
   if (ignoreButton) ignoreButton.disabled = selectedCount === 0;
+  if (refreshButton) refreshButton.disabled = selectedCount === 0;
   if (count) count.textContent = selectedCount ? `${selectedCount} sélectionné(s)` : "";
   const selectAll = document.querySelector("[data-select-visible-products]");
   if (selectAll) {
@@ -952,6 +954,27 @@ async function setup() {
       state.selectedProductIds.clear();
       state.openProductId = null;
       window.alert(`${result.approved || 0} erreur(s) approuvée(s) sur ${result.products || 0} produit(s).`);
+      await loadProducts();
+      await loadBootstrap();
+      await loadIgnored();
+    });
+    $("#refreshSelectedProducts").addEventListener("click", async () => {
+      const selectedIds = [...state.selectedProductIds];
+      if (selectedIds.length === 0) {
+        window.alert("Sélectionne au moins un produit.");
+        return;
+      }
+      const ok = window.confirm(`Relire ${selectedIds.length} produit(s) directement dans Lightspeed et recalculer l'audit?`);
+      if (!ok) return;
+      const result = await api("/api/products/refresh-ecom", {
+        method: "POST",
+        body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length }),
+      });
+      state.selectedProductIds.clear();
+      state.openProductId = null;
+      window.alert(result.message || "Produits rafraîchis.");
+      state.loadedPages.delete("overview");
+      state.loadedPages.delete("syncedProducts");
       await loadProducts();
       await loadBootstrap();
       await loadIgnored();
