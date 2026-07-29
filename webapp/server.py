@@ -1020,10 +1020,16 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
     filter_values = ecom_attribute_values(context.get("attributes") or []) + ecom_tag_values(context.get("tags") or [])
     image_urls = [url for image in images if (url := image_url_from_ecom_image(image))]
     brand_value = clean(brand.get("title") or brand.get("name") or brand.get("id"))
+    title_fc = clean(product.get("title"))
+    fulltitle_fc = clean(product.get("fulltitle") or product.get("fullTitle") or product.get("title"))
+    description_fc = clean(product.get("description"))
+    content_fc = clean(product.get("content"))
+    url_fc = clean(product.get("url"))
     meta_title_fc = ecom_metafield_value(metafields, "meta_title_fc", "meta_title_fr") or clean(product.get("title"))
     meta_description_fc = ecom_metafield_value(metafields, "meta_description_fc", "meta_description_fr")
     meta_keywords_fc = ecom_metafield_value(metafields, "meta_keywords_fc", "meta_keywords_fr")
     google_category_fc = ecom_metafield_value(metafields, "google_product_category_fc", "google_product_category_fr")
+    primary_category = category_titles[0] if category_titles else ""
     rows: list[dict[str, str]] = []
     for variant in variants:
         variant_id = clean(variant.get("id") or variant.get("variantID") or variant.get("productVariantID")) or product_id_value
@@ -1032,22 +1038,39 @@ def ecom_audit_candidate_rows(product: dict[str, Any], context: dict[str, Any]) 
                 "Internal_ID": product_id_value,
                 "Internal_Variant_ID": variant_id,
                 "Brand": brand_value,
-                "FC_Title_Short": clean(product.get("title")),
-                "US_Title_Short": clean(product.get("title")),
+                "FR_Title_Short": title_fc,
+                "FR_Title_Long": fulltitle_fc,
+                "FC_Title_Short": title_fc,
+                "FC_Title_Long": fulltitle_fc,
+                "US_Title_Short": title_fc,
+                "US_Title_Long": fulltitle_fc,
                 "SKU": clean(variant.get("sku") or variant.get("articleCode") or product.get("sku")),
                 "UPC": clean(variant.get("ean") or variant.get("upc") or variant.get("ean13") or product.get("ean")),
                 "Visible": "Y" if str(product.get("isVisible")).lower() == "true" or clean(product.get("visibility")).lower() == "visible" else "N",
                 "Stock_Disable_Sold_Out": clean(variant.get("stockTracking") or variant.get("stockDisableSoldOut") or product.get("stockDisableSoldOut")),
                 "Images": " | ".join(image_urls),
-                "FC_Description_Short": clean(product.get("description")),
-                "FC_Description_Long": clean(product.get("content")),
-                "US_Description_Short": "",
-                "US_Description_Long": "",
-                "URL": clean(product.get("url")),
+                "FC_Description_Short": description_fc,
+                "FC_Description_Long": content_fc,
+                "US_Description_Short": description_fc,
+                "US_Description_Long": content_fc,
+                "URL": url_fc,
                 "FC_Meta_Title": meta_title_fc,
                 "FC_Meta_Description": meta_description_fc,
                 "FC_Meta_Keywords": meta_keywords_fc,
                 "FC_Google_Category": google_category_fc,
+                "US_Meta_Title": meta_title_fc,
+                "US_Meta_Description": meta_description_fc,
+                "US_Meta_Keywords": meta_keywords_fc,
+                "US_Google_Category": google_category_fc,
+                "FR_Meta_Title": meta_title_fc,
+                "FR_Meta_Description": meta_description_fc,
+                "FR_Meta_Keywords": meta_keywords_fc,
+                "FR_Google_Category": google_category_fc,
+                "FC_URL": url_fc,
+                "US_URL": url_fc,
+                "FR_URL": url_fc,
+                "FC_Category_1": primary_category,
+                "US_Category_1": primary_category,
                 "Categories": " | ".join(category_titles),
                 "Filtres": " | ".join(filter_values),
                 "Updated_At": clean(product.get("updatedAt") or product.get("updated_at") or product.get("modifiedAt")),
