@@ -1489,30 +1489,41 @@ def ecom_full_sync_is_running() -> bool:
     return clean(status.get("status")) == "running"
 
 
-def run_ecom_full_catalogue_sync(batch_size: int = 20, max_products: int = 0) -> None:
+def run_ecom_full_catalogue_sync(batch_size: int = 10, max_products: int = 0, resume: bool = True) -> None:
     if not ECOM_FULL_SYNC_LOCK.acquire(blocking=False):
         return
     ensure_ecom_api_tables()
     started_at = now_text()
+    latest_status = latest_ecom_full_sync_status() if resume else {}
+    can_resume = clean(latest_status.get("status")) in {"error", "paused"} and int(latest_status.get("offset") or 0) > 0
+    resume_offset = int(latest_status.get("offset") or 0) if can_resume else 0
+    resume_products_seen = int(latest_status.get("products_seen") or 0) if can_resume else 0
+    resume_variants_saved = int(latest_status.get("variants_saved") or 0) if can_resume else 0
+    start_message = (
+        f"Reprise de la synchronisation eCom à partir du produit {resume_offset}."
+        if can_resume
+        else "Synchronisation complète eCom démarrée."
+    )
     with connect() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO ecom_full_sync_runs (status, started_at, message)
-            VALUES ('running', ?, 'Synchronisation complète eCom démarrée.')
+            INSERT INTO ecom_full_sync_runs (status, started_at, offset, products_seen, variants_saved, message)
+            VALUES ('running', ?, ?, ?, ?, ?)
             """,
-            (started_at,),
+            (started_at, resume_offset, resume_products_seen, resume_variants_saved, start_message),
         )
         run_id = int(cursor.lastrowid)
-        conn.execute("DELETE FROM ecom_api_products")
+        if not can_resume:
+            conn.execute("DELETE FROM ecom_api_products")
 
-    offset = 0
-    products_seen = 0
-    variants_saved = 0
+    offset = resume_offset
+    products_seen = resume_products_seen
+    variants_saved = resume_variants_saved
     try:
         while True:
             if max_products and products_seen >= max_products:
                 break
-            current_batch_size = max(1, min(batch_size, 100))
+            current_batch_size = max(1, min(batch_size, 50))
             if max_products:
                 current_batch_size = min(current_batch_size, max_products - products_seen)
             _, raw_body = lightspeed_ecom_get_products_raw(current_batch_size, offset)
@@ -1542,11 +1553,11 @@ def run_ecom_full_catalogue_sync(batch_size: int = 20, max_products: int = 0) ->
                             run_id,
                         ),
                     )
-                time.sleep(1.2)
+                time.sleep(2.0)
 
             if len(products) < current_batch_size:
                 break
-            time.sleep(2)
+            time.sleep(4.0)
 
         published = publish_ecom_api_products_to_catalogue_report()
         message = (
@@ -1565,17 +1576,28 @@ def run_ecom_full_catalogue_sync(batch_size: int = 20, max_products: int = 0) ->
                 (now_text(), offset, products_seen, variants_saved, message, run_id),
             )
     except Exception as exc:
+        status = "error"
         message = mask_sensitive_text_full(str(exc))[:1500]
+        if isinstance(exc, HTTPException):
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            detail_status = int(detail.get("status") or exc.status_code or 0)
+            detail_body = clean(detail.get("body"))
+            if detail_status == 429 or "Too many requests" in detail_body:
+                status = "paused"
+                message = (
+                    f"Pause limite Lightspeed à {products_seen} produit(s). "
+                    "Reclique sur Synchroniser catalogue eCom pour reprendre."
+                )
         logger.exception("Full eCom catalogue sync failed")
         with connect() as conn:
             conn.execute(
                 """
                 UPDATE ecom_full_sync_runs
-                SET status = 'error', finished_at = ?, offset = ?, products_seen = ?,
+                SET status = ?, finished_at = ?, offset = ?, products_seen = ?,
                     variants_saved = ?, message = ?
                 WHERE id = ?
                 """,
-                (now_text(), offset, products_seen, variants_saved, message, run_id),
+                (status, now_text(), offset, products_seen, variants_saved, message, run_id),
             )
     finally:
         ECOM_FULL_SYNC_LOCK.release()
@@ -3653,14 +3675,16 @@ async def api_ecom_full_sync_start(
     require_admin(x_remote_user)
     if ecom_full_sync_is_running():
         return {"ok": True, "already_running": True, "message": "La synchronisation complète est déjà en cours."}
-    batch_size = 20
+    batch_size = 10
     max_products = 0
+    resume = True
     if isinstance(payload, dict):
-        batch_size = int(clean(payload.get("batch_size")) or 20)
+        batch_size = int(clean(payload.get("batch_size")) or 10)
         max_products = int(clean(payload.get("max_products")) or 0)
+        resume = clean(payload.get("resume")).lower() not in {"0", "false", "no", "non"}
     thread = threading.Thread(
         target=run_ecom_full_catalogue_sync,
-        kwargs={"batch_size": batch_size, "max_products": max_products},
+        kwargs={"batch_size": batch_size, "max_products": max_products, "resume": resume},
         daemon=True,
     )
     thread.start()

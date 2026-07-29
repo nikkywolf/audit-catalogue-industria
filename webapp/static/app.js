@@ -189,7 +189,9 @@ function renderFullEcomSyncStatus(status) {
     return;
   }
   const suffix = status.finished_at || status.started_at || "";
-  box.textContent = `${status.status} · ${status.products_seen || 0} produits · ${status.variants_saved || 0} variantes${suffix ? ` · ${suffix}` : ""}`;
+  const summary = `${status.status} · ${status.products_seen || 0} produits · ${status.variants_saved || 0} variantes${suffix ? ` · ${suffix}` : ""}`;
+  const message = status.message ? `<div>${escapeHtml(status.message)}</div>` : "";
+  box.innerHTML = `<div>${escapeHtml(summary)}</div>${message}`;
 }
 
 async function loadFullEcomSyncStatus() {
@@ -202,7 +204,7 @@ async function loadFullEcomSyncStatus() {
 async function runFullEcomSync() {
   const button = $("#fullEcomSyncButton");
   const ok = window.confirm(
-    "Lancer la synchronisation complète du catalogue eCom? Le rapport du dashboard sera remplacé seulement quand la sync sera terminée avec succès."
+    "Lancer ou reprendre la synchronisation complète du catalogue eCom? Le rapport du dashboard sera remplacé seulement quand la sync sera terminée avec succès."
   );
   if (!ok) return;
   button.disabled = true;
@@ -210,7 +212,7 @@ async function runFullEcomSync() {
   try {
     const result = await api("/api/ecom/full-sync/start", {
       method: "POST",
-      body: JSON.stringify({ batch_size: 20 }),
+      body: JSON.stringify({ batch_size: 10, resume: true }),
     });
     window.alert(result.message || "Synchronisation complète démarrée.");
     await loadFullEcomSyncStatus();
