@@ -103,6 +103,17 @@ button:hover {
   text-align: left;
 }
 
+#fullEcomSyncStatus {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+#fullEcomSyncStatus div + div {
+  margin-top: 4px;
+}
+
 .sync-select {
   width: 100%;
   padding: 8px 12px;

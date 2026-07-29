@@ -43,6 +43,24 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function friendlyFullEcomMessage(status) {
+  const message = String(status?.message || "");
+  const rawStatus = String(status?.status || "");
+  if (rawStatus === "running") {
+    return message || "Synchronisation en cours...";
+  }
+  if (rawStatus === "success") {
+    return message || "Synchronisation terminée.";
+  }
+  if (rawStatus === "paused" || message.includes("Too many requests") || message.includes("code\":429")) {
+    return "Pause limite Lightspeed. Reclique sur Synchroniser catalogue eCom pour reprendre.";
+  }
+  if (message.length > 180) {
+    return `${message.slice(0, 180)}...`;
+  }
+  return message;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -190,7 +208,8 @@ function renderFullEcomSyncStatus(status) {
   }
   const suffix = status.finished_at || status.started_at || "";
   const summary = `${status.status} · ${status.products_seen || 0} produits · ${status.variants_saved || 0} variantes${suffix ? ` · ${suffix}` : ""}`;
-  const message = status.message ? `<div>${escapeHtml(status.message)}</div>` : "";
+  const friendlyMessage = friendlyFullEcomMessage(status);
+  const message = friendlyMessage ? `<div>${escapeHtml(friendlyMessage)}</div>` : "";
   box.innerHTML = `<div>${escapeHtml(summary)}</div>${message}`;
 }
 
