@@ -59,6 +59,8 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 ECOM_FULL_SYNC_LOCK = threading.Lock()
+ECOM_RESYNC_WORKER_LOCK = threading.Lock()
+ECOM_RESYNC_WORKER_THREAD: threading.Thread | None = None
 
 
 def load_dotenv() -> None:
@@ -286,6 +288,17 @@ def ensure_ecom_api_tables() -> None:
                 products_seen INTEGER NOT NULL DEFAULT 0,
                 variants_saved INTEGER NOT NULL DEFAULT 0,
                 message TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS ecom_resync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Internal_Variant_ID TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                message TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT
             );
             """
         )
@@ -1574,6 +1587,169 @@ def resync_ecom_products_to_catalogue_report(variant_ids: list[str], limit: int 
         "variant_ids": sorted(updated_variant_ids),
         "message": f"{products_refreshed} fiche(s) relue(s), {variants_updated} variante(s) recalculée(s).",
     }
+
+
+def enqueue_ecom_resync_products(variant_ids: list[str]) -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    selected_ids = [clean(variant_id) for variant_id in variant_ids if clean(variant_id)]
+    now = now_text()
+    queued = 0
+    with connect() as conn:
+        for variant_id in selected_ids[:500]:
+            result = conn.execute(
+                """
+                INSERT INTO ecom_resync_queue
+                (Internal_Variant_ID, status, attempts, message, created_at, updated_at)
+                VALUES (?, 'pending', 0, 'En attente de re-synchronisation.', ?, ?)
+                ON CONFLICT(Internal_Variant_ID) DO UPDATE SET
+                    status = CASE
+                        WHEN ecom_resync_queue.status IN ('success', 'error') THEN 'pending'
+                        ELSE ecom_resync_queue.status
+                    END,
+                    message = CASE
+                        WHEN ecom_resync_queue.status IN ('success', 'error') THEN 'En attente de re-synchronisation.'
+                        ELSE ecom_resync_queue.message
+                    END,
+                    updated_at = excluded.updated_at,
+                    finished_at = NULL
+                """,
+                (variant_id, now, now),
+            )
+            queued += int(result.rowcount or 0)
+    ensure_ecom_resync_worker()
+    return {"ok": True, "queued": queued, "message": f"{len(selected_ids[:500])} produit(s) ajouté(s) à la file interne."}
+
+
+def next_ecom_resync_queue_item() -> Optional[sqlite3.Row]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM ecom_resync_queue
+            WHERE status = 'pending'
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            """
+            UPDATE ecom_resync_queue
+            SET status = 'running',
+                attempts = attempts + 1,
+                message = 'Re-synchronisation en cours...',
+                updated_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (now_text(), row["id"]),
+        )
+    return row
+
+
+def run_ecom_resync_queue_worker() -> None:
+    if not ECOM_RESYNC_WORKER_LOCK.acquire(blocking=False):
+        return
+    try:
+        while True:
+            item = next_ecom_resync_queue_item()
+            if not item:
+                break
+            variant_id = clean(item["Internal_Variant_ID"])
+            try:
+                result = resync_ecom_products_to_catalogue_report([variant_id], 1)
+                updated_variants = int(result.get("variants_updated") or 0)
+                if updated_variants <= 0:
+                    raise RuntimeError("Aucune variante recalculée pour ce produit.")
+                now = now_text()
+                with connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE ecom_resync_queue
+                        SET status = 'success',
+                            message = ?,
+                            updated_at = ?,
+                            finished_at = ?
+                        WHERE id = ?
+                        """,
+                        (clean(result.get("message")) or "Produit re-synchronisé.", now, now, item["id"]),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE gpt_batch_items
+                        SET status = 'resynced',
+                            updated_at = ?
+                        WHERE Internal_Variant_ID = ? AND status = 'approved'
+                        """,
+                        (now, variant_id),
+                    )
+                time.sleep(2.0)
+            except Exception as exc:
+                message = mask_sensitive_text_full(str(exc))[:1000]
+                logger.exception("eCom resync queue item failed: %s", variant_id)
+                with connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE ecom_resync_queue
+                        SET status = 'error',
+                            message = ?,
+                            updated_at = ?,
+                            finished_at = ?
+                        WHERE id = ?
+                        """,
+                        (message, now_text(), now_text(), item["id"]),
+                    )
+                time.sleep(4.0)
+    finally:
+        ECOM_RESYNC_WORKER_LOCK.release()
+
+
+def ensure_ecom_resync_worker() -> None:
+    global ECOM_RESYNC_WORKER_THREAD
+    if ECOM_RESYNC_WORKER_THREAD and ECOM_RESYNC_WORKER_THREAD.is_alive():
+        return
+    ECOM_RESYNC_WORKER_THREAD = threading.Thread(target=run_ecom_resync_queue_worker, daemon=True)
+    ECOM_RESYNC_WORKER_THREAD.start()
+
+
+def ecom_resync_queue_status(limit: int = 25) -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.*, b.Brand, b.Product_Title, b.SKU
+            FROM ecom_resync_queue q
+            LEFT JOIN gpt_batch_items b ON b.Internal_Variant_ID = q.Internal_Variant_ID
+            ORDER BY q.updated_at DESC, q.id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 100)),),
+        ).fetchall()
+        counts = {
+            row["status"]: row["count"]
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS count FROM ecom_resync_queue GROUP BY status"
+            ).fetchall()
+        }
+    return {"counts": counts, "items": [dict(row) for row in rows]}
+
+
+@app.on_event("startup")
+def startup_background_workers() -> None:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE ecom_resync_queue
+            SET status = 'pending',
+                message = 'Repris après redémarrage du serveur.',
+                updated_at = ?
+            WHERE status = 'running'
+            """,
+            (now_text(),),
+        )
+    ensure_ecom_resync_worker()
 
 
 def latest_ecom_full_sync_status() -> dict[str, Any]:
@@ -4812,26 +4988,17 @@ def api_gpt_batch_resync_approved(
     variant_ids = [clean(item) for item in payload.variant_ids if clean(item)]
     if not variant_ids:
         raise HTTPException(status_code=400, detail="Aucun produit sélectionné.")
-    result = resync_ecom_products_to_catalogue_report(variant_ids, payload.limit)
-    refreshed_ids = set(result.get("variant_ids") or [])
-    resynced_ids = [variant_id for variant_id in variant_ids if variant_id in refreshed_ids]
-    now = now_text()
-    with connect() as conn:
-        updated = 0
-        if resynced_ids:
-            placeholders = ",".join("?" for _ in resynced_ids)
-            updated = conn.execute(
-                f"""
-                UPDATE gpt_batch_items
-                SET status = 'resynced',
-                    updated_at = ?
-                WHERE status = 'approved'
-                  AND Internal_Variant_ID IN ({placeholders})
-                """,
-                [now, *resynced_ids],
-            ).rowcount
-    result["status_updated"] = int(updated or 0)
-    return result
+    return enqueue_ecom_resync_products(variant_ids[: max(1, min(payload.limit, 500))])
+
+
+@app.get("/api/ecom/resync-queue/status")
+def api_ecom_resync_queue_status(
+    limit: int = 25,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_ecom_resync_worker()
+    return ecom_resync_queue_status(limit)
 
 
 @app.post("/api/gpt-batches/items/{variant_id}/restore")

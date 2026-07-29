@@ -23,6 +23,7 @@ const state = {
   selectedProductIds: new Set(),
   productRequestId: 0,
   syncedProductsStats: null,
+  resyncQueueSignature: "",
   loadedPages: new Set(),
 };
 
@@ -880,6 +881,38 @@ async function loadBatchResynced() {
   });
 }
 
+function renderResyncQueueStatus(data) {
+  const box = $("#resyncQueueStatus");
+  if (!box) return;
+  const counts = data.counts || {};
+  const summary = [
+    `En attente: ${counts.pending || 0}`,
+    `En cours: ${counts.running || 0}`,
+    `Re-sync: ${counts.success || 0}`,
+    `Erreurs: ${counts.error || 0}`,
+  ].join(" · ");
+  const rows = (data.items || []).slice(0, 6).map((item) => {
+    const title = [item.Brand, item.Product_Title].filter(Boolean).join(" | ") || item.Internal_Variant_ID;
+    return `<div><strong>${escapeHtml(item.status)}</strong> · ${escapeHtml(title)}${item.message ? ` · ${escapeHtml(item.message)}` : ""}</div>`;
+  }).join("");
+  box.innerHTML = `<div>${escapeHtml(summary)}</div>${rows}`;
+}
+
+async function loadResyncQueueStatus() {
+  if (!$("#resyncQueueStatus")) return null;
+  const data = await api("/api/ecom/resync-queue/status?limit=25");
+  const signature = JSON.stringify(data.counts || {});
+  const changed = state.resyncQueueSignature && state.resyncQueueSignature !== signature;
+  state.resyncQueueSignature = signature;
+  renderResyncQueueStatus(data);
+  if (changed) {
+    await loadBootstrap();
+    await loadBatchApproved();
+    await loadBatchResynced();
+  }
+  return data;
+}
+
 function batchItemsTableHtml(items, countLabel, withApprove, withSelection = false, withRestore = false, selectionKind = "batch") {
   const selectionHeader = withSelection ? `<th><input type="checkbox" data-batch-select-all="${escapeHtml(selectionKind)}" /></th>` : "";
   return `
@@ -922,6 +955,7 @@ async function loadGptBatchPage() {
   await loadBatchCompleted();
   await loadBatchApproved();
   await loadBatchResynced();
+  await loadResyncQueueStatus();
 }
 
 async function loadIntegrations() {
@@ -1089,12 +1123,9 @@ async function setup() {
         method: "POST",
         body: JSON.stringify({ variant_ids: selectedIds, limit: selectedIds.length }),
       });
-      window.alert(result.message || "Produits re-synchronisés.");
-      state.loadedPages.clear();
-      await loadBootstrap();
+      window.alert(result.message || "Produits ajoutés à la file de re-synchronisation.");
       await loadBatchApproved();
-      await loadBatchResynced();
-      await loadProducts();
+      await loadResyncQueueStatus();
     });
     $("#queueBatchCandidates").addEventListener("click", async () => {
       await api("/api/gpt-batches/queue", {
@@ -1161,6 +1192,13 @@ async function setup() {
       await loadGptBatchPage();
     });
   }
+
+  window.setInterval(() => {
+    const batchPage = $("#gptBatch");
+    if (batchPage && batchPage.classList.contains("active")) {
+      loadResyncQueueStatus().catch(() => {});
+    }
+  }, 10000);
 
   $("#todoForm").addEventListener("submit", async (event) => {
     event.preventDefault();
