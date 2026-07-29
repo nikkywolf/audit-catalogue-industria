@@ -1520,7 +1520,7 @@ def resync_ecom_products_to_catalogue_report(variant_ids: list[str], limit: int 
                 matched = next((row for row in mapped_rows if clean(row.get("SKU")).lower() == original_sku), None)
             if not matched and original_upc:
                 matched = next((row for row in mapped_rows if clean(row.get("UPC")).lower() == original_upc), None)
-            if not matched and len(mapped_rows) == 1:
+            if not matched and mapped_rows:
                 matched = mapped_rows[0]
             if not matched:
                 continue
