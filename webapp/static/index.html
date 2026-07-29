@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Industria Audit</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260729-1035" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260729-1105" />
   </head>
   <body>
     <aside class="sidebar">
@@ -17,6 +17,11 @@
         <button class="nav" data-page="gptBatch">Batch GPT</button>
         <button class="nav" data-page="todos">To-Do List</button>
         <button id="ecomSyncButton" class="sync-menu admin-only" type="button">Synchronisation</button>
+        <select id="ecomEnrichLimit" class="sync-select admin-only" aria-label="Nombre de produits à enrichir">
+          <option value="10">Enrichir 10</option>
+          <option value="25" selected>Enrichir 25</option>
+          <option value="50">Enrichir 50</option>
+        </select>
         <button id="ecomEnrichButton" class="sync-menu admin-only" type="button">Enrichir nouveaux produits</button>
         <button class="nav admin-only" data-page="syncedProducts">Derniers synchronisés</button>
         <button class="nav admin-only" data-page="integrations">Intégrations</button>
@@ -206,6 +211,6 @@
       </section>
     </main>
 
-    <script src="/static/app.js?v=20260729-1035"></script>
+    <script src="/static/app.js?v=20260729-1105"></script>
   </body>
 </html>

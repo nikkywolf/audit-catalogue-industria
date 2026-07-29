@@ -103,6 +103,15 @@ button:hover {
   text-align: left;
 }
 
+.sync-select {
+  width: 100%;
+  padding: 8px 12px;
+}
+
+.synced-metrics {
+  margin-bottom: 14px;
+}
+
 .nav.active {
   background: #1b2a34;
   border-color: var(--accent);

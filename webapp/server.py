@@ -2906,6 +2906,9 @@ def api_ecom_synced_products(
     limit = max(1, min(int(limit), 500))
     query = clean(search).lower()
     with connect() as conn:
+        total_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products").fetchone()[0])
+        enriched_count = int(conn.execute("SELECT COUNT(*) FROM ecom_api_products WHERE COALESCE(enriched_at, '') != ''").fetchone()[0])
+        pending_count = total_count - enriched_count
         rows = conn.execute(
             """
             SELECT Internal_ID, Internal_Variant_ID, Brand, Product_Title, SKU, UPC, Visible,
@@ -2932,7 +2935,16 @@ def api_ecom_synced_products(
         items.append(item)
         if len(items) >= limit:
             break
-    return {"items": items, "total": len(items), "backfilled_brands": backfilled}
+    return {
+        "items": items,
+        "total": len(items),
+        "stats": {
+            "synced": total_count,
+            "enriched": enriched_count,
+            "pending": pending_count,
+        },
+        "backfilled_brands": backfilled,
+    }
 
 
 @app.get("/catalogue/ecom-api-sync")

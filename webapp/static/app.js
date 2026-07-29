@@ -20,6 +20,7 @@ const state = {
   batchCompletedSelectedIds: new Set(),
   selectedProductIds: new Set(),
   productRequestId: 0,
+  syncedProductsStats: null,
   loadedPages: new Set(),
 };
 
@@ -154,13 +155,15 @@ async function runEcomSyncMissing() {
 async function runEcomEnrich() {
   const button = $("#ecomEnrichButton");
   const originalText = button.textContent;
+  const limit = Number($("#ecomEnrichLimit").value || 25);
   button.disabled = true;
+  $("#ecomEnrichLimit").disabled = true;
   button.textContent = "Enrichissement...";
-  $("#syncBox").textContent = "Enrichissement des nouveaux produits eCom...";
+  $("#syncBox").textContent = `Enrichissement de ${limit} nouveaux produits eCom...`;
   try {
     const result = await api("/api/ecom/enrich", {
       method: "POST",
-      body: JSON.stringify({ limit: 10 }),
+      body: JSON.stringify({ limit }),
     });
     window.alert(result.message || "Enrichissement terminé.");
     state.loadedPages.delete("overview");
@@ -173,6 +176,7 @@ async function runEcomEnrich() {
     }
   } finally {
     button.disabled = false;
+    $("#ecomEnrichLimit").disabled = false;
     button.textContent = originalText;
   }
 }
@@ -183,11 +187,18 @@ async function loadSyncedProducts() {
   const data = await api(`/api/ecom/synced-products?search=${search}&limit=${limit}`);
   state.syncedProducts = data.items;
   state.syncedProductsTotal = data.total;
+  state.syncedProductsStats = data.stats;
   renderSyncedProducts(data.backfilled_brands || 0);
 }
 
 function renderSyncedProducts(backfilledBrands = 0) {
+  const stats = state.syncedProductsStats || { synced: 0, enriched: 0, pending: 0 };
   $("#syncedProductsTable").innerHTML = `
+    <div class="metrics synced-metrics">
+      <div class="metric"><div class="label">Synchronisés</div><div class="value">${escapeHtml(stats.synced)}</div></div>
+      <div class="metric"><div class="label">Enrichis</div><div class="value">${escapeHtml(stats.enriched)}</div></div>
+      <div class="metric"><div class="label">À enrichir</div><div class="value">${escapeHtml(stats.pending)}</div></div>
+    </div>
     <div class="muted table-count">Produits synchronisés affichés : ${state.syncedProductsTotal}</div>
     ${backfilledBrands ? `<div class="muted table-count">${backfilledBrands} marque(s) récupérée(s) automatiquement.</div>` : ""}
     <table>
