@@ -1081,7 +1081,7 @@ def ecom_product_id(product: dict[str, Any]) -> str:
 
 
 def current_export_product_ids() -> tuple[set[str], set[str]]:
-    products = load_products()
+    products = load_export_products()
     internal_ids = {product_internal_id(row) for row in products if product_internal_id(row)}
     variant_ids = {product_id(row) for row in products if product_id(row)}
     return internal_ids, variant_ids
@@ -1635,8 +1635,51 @@ def load_json_payload_table(table: str) -> list[dict[str, Any]]:
     return records
 
 
-def load_products() -> list[dict[str, Any]]:
+def load_export_products() -> list[dict[str, Any]]:
     return load_json_payload_table("catalogue_report")
+
+
+def load_ecom_api_products() -> list[dict[str, Any]]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT mapped_payload, enriched_at
+            FROM ecom_api_products
+            ORDER BY synced_at DESC, Brand, Product_Title
+            """
+        ).fetchall()
+    products: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["mapped_payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload["Source catalogue"] = "API eCom"
+        if not clean(row["enriched_at"]):
+            payload.setdefault("Priorité", "Action requise")
+            payload.setdefault("Type de correction", "API eCom")
+            payload.setdefault("Alertes catalogue", "Produit synchronisé à enrichir")
+        products.append(payload)
+    return products
+
+
+def load_products() -> list[dict[str, Any]]:
+    export_products = load_export_products()
+    export_variant_ids = {product_id(row) for row in export_products if product_id(row)}
+    export_internal_ids = {product_internal_id(row) for row in export_products if product_internal_id(row)}
+    api_products = []
+    for row in load_ecom_api_products():
+        variant_id = product_id(row)
+        internal_id = product_internal_id(row)
+        if variant_id and variant_id in export_variant_ids:
+            continue
+        if internal_id and internal_id in export_internal_ids:
+            continue
+        api_products.append(row)
+    return export_products + api_products
 
 
 def load_brand_summary() -> list[dict[str, Any]]:
