@@ -61,6 +61,8 @@ app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 ECOM_FULL_SYNC_LOCK = threading.Lock()
 ECOM_RESYNC_WORKER_LOCK = threading.Lock()
 ECOM_RESYNC_WORKER_THREAD: threading.Thread | None = None
+ECOM_BACKGROUND_SYNC_LOCK = threading.Lock()
+ECOM_BACKGROUND_SYNC_THREAD: threading.Thread | None = None
 
 
 def load_dotenv() -> None:
@@ -299,6 +301,12 @@ def ensure_ecom_api_tables() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 finished_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS ecom_background_sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             """
         )
@@ -1472,6 +1480,31 @@ def save_enriched_ecom_product(product: dict[str, Any], synced_at: str) -> int:
     return saved
 
 
+def upsert_ecom_product_to_catalogue_report(product: dict[str, Any], synced_at: str, rebuild_summary: bool = True) -> int:
+    save_enriched_ecom_product(product, synced_at)
+    context = ecom_product_context(product)
+    mapped_rows = ecom_audit_candidate_rows(product, context)
+    updated = 0
+    with connect() as conn:
+        for mapped in mapped_rows:
+            mapped.update(audit_product_row(mapped))
+            variant_id = product_id(mapped)
+            if not variant_id:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO catalogue_report
+                (Internal_Variant_ID, payload, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (variant_id, json.dumps(mapped, ensure_ascii=False), synced_at),
+            )
+            updated += 1
+    if updated and rebuild_summary:
+        rebuild_brand_summary_from_catalogue_report()
+    return updated
+
+
 def refresh_ecom_products_from_lightspeed(variant_ids: list[str], limit: int = 100) -> dict[str, Any]:
     products = load_products()
     product_map = {product_id(row): row for row in products}
@@ -1735,6 +1768,155 @@ def ecom_resync_queue_status(limit: int = 25) -> dict[str, Any]:
     return {"counts": counts, "items": [dict(row) for row in rows]}
 
 
+def ecom_background_sync_enabled() -> bool:
+    value = clean(os.getenv("ECOM_BACKGROUND_SYNC_ENABLED", "1")).lower()
+    return value not in {"0", "false", "no", "non", "off"}
+
+
+def ecom_background_sync_batch_size() -> int:
+    return max(1, min(int(clean(os.getenv("ECOM_BACKGROUND_SYNC_BATCH_SIZE", "5")) or 5), 25))
+
+
+def ecom_background_sync_interval_seconds() -> int:
+    return max(30, min(int(clean(os.getenv("ECOM_BACKGROUND_SYNC_INTERVAL_SECONDS", "120")) or 120), 3600))
+
+
+def get_ecom_background_sync_state(key: str, default: str = "") -> str:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM ecom_background_sync_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return clean(row["value"]) if row else default
+
+
+def set_ecom_background_sync_state(values: dict[str, Any]) -> None:
+    ensure_ecom_api_tables()
+    now = now_text()
+    with connect() as conn:
+        for key, value in values.items():
+            conn.execute(
+                """
+                INSERT INTO ecom_background_sync_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, clean(value), now),
+            )
+
+
+def run_ecom_background_sync_tick() -> dict[str, Any]:
+    if not ecom_background_sync_enabled():
+        set_ecom_background_sync_state({"status": "disabled", "message": "Sync interne désactivée."})
+        return {"ok": True, "status": "disabled", "products_seen": 0, "variants_updated": 0}
+    if not ECOM_BACKGROUND_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": True, "status": "running", "products_seen": 0, "variants_updated": 0}
+    batch_size = ecom_background_sync_batch_size()
+    offset = int(get_ecom_background_sync_state("offset", "0") or 0)
+    products_seen = 0
+    variants_updated = 0
+    try:
+        set_ecom_background_sync_state({
+            "status": "running",
+            "message": f"Lecture eCom en arrière-plan à partir du produit {offset}.",
+            "started_at": now_text(),
+        })
+        _, raw_body = lightspeed_ecom_get_products_raw(batch_size, offset)
+        payload = json.loads(raw_body)
+        products = extract_ecom_products(payload)
+        if not products:
+            offset = 0
+            set_ecom_background_sync_state({
+                "offset": offset,
+                "status": "idle",
+                "message": "Tour complet terminé. Reprise au début du catalogue.",
+                "finished_at": now_text(),
+            })
+            return {"ok": True, "status": "idle", "products_seen": 0, "variants_updated": 0}
+
+        synced_at = now_text()
+        for product_summary in products:
+            product_id_value = ecom_product_id(product_summary)
+            if not product_id_value:
+                continue
+            product = lightspeed_ecom_get_product(product_id_value)
+            variants_updated += upsert_ecom_product_to_catalogue_report(product, synced_at, rebuild_summary=False)
+            products_seen += 1
+            time.sleep(2.0)
+
+        if variants_updated:
+            rebuild_brand_summary_from_catalogue_report()
+        offset = offset + len(products)
+        if len(products) < batch_size:
+            offset = 0
+        message = f"Sync interne: {products_seen} produit(s) lus, {variants_updated} variante(s) mises à jour."
+        set_ecom_background_sync_state({
+            "offset": offset,
+            "status": "idle",
+            "message": message,
+            "last_products_seen": products_seen,
+            "last_variants_updated": variants_updated,
+            "finished_at": now_text(),
+        })
+        return {
+            "ok": True,
+            "status": "idle",
+            "products_seen": products_seen,
+            "variants_updated": variants_updated,
+            "next_offset": offset,
+            "message": message,
+        }
+    except Exception as exc:
+        message = mask_sensitive_text_full(str(exc))[:1000]
+        logger.exception("eCom background sync tick failed")
+        set_ecom_background_sync_state({
+            "status": "error",
+            "message": message,
+            "finished_at": now_text(),
+        })
+        return {"ok": False, "status": "error", "products_seen": products_seen, "variants_updated": variants_updated, "message": message}
+    finally:
+        ECOM_BACKGROUND_SYNC_LOCK.release()
+
+
+def run_ecom_background_sync_worker() -> None:
+    while True:
+        run_ecom_background_sync_tick()
+        time.sleep(ecom_background_sync_interval_seconds())
+
+
+def ensure_ecom_background_sync_worker() -> None:
+    global ECOM_BACKGROUND_SYNC_THREAD
+    if not ecom_background_sync_enabled():
+        return
+    if ECOM_BACKGROUND_SYNC_THREAD and ECOM_BACKGROUND_SYNC_THREAD.is_alive():
+        return
+    ECOM_BACKGROUND_SYNC_THREAD = threading.Thread(target=run_ecom_background_sync_worker, daemon=True)
+    ECOM_BACKGROUND_SYNC_THREAD.start()
+
+
+def ecom_background_sync_status() -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        rows = conn.execute("SELECT key, value, updated_at FROM ecom_background_sync_state").fetchall()
+    state = {row["key"]: row["value"] for row in rows}
+    return {
+        "enabled": ecom_background_sync_enabled(),
+        "status": state.get("status", "idle"),
+        "message": state.get("message", "Sync interne en attente."),
+        "offset": int(state.get("offset") or 0),
+        "batch_size": ecom_background_sync_batch_size(),
+        "interval_seconds": ecom_background_sync_interval_seconds(),
+        "started_at": state.get("started_at", ""),
+        "finished_at": state.get("finished_at", ""),
+        "last_products_seen": int(state.get("last_products_seen") or 0),
+        "last_variants_updated": int(state.get("last_variants_updated") or 0),
+    }
+
+
 @app.on_event("startup")
 def startup_background_workers() -> None:
     ensure_ecom_api_tables()
@@ -1750,6 +1932,7 @@ def startup_background_workers() -> None:
             (now_text(),),
         )
     ensure_ecom_resync_worker()
+    ensure_ecom_background_sync_worker()
 
 
 def latest_ecom_full_sync_status() -> dict[str, Any]:
@@ -3949,6 +4132,15 @@ def api_ecom_full_sync_status(
 ):
     require_admin(x_remote_user)
     return latest_ecom_full_sync_status()
+
+
+@app.get("/api/ecom/internal-sync/status")
+def api_ecom_internal_sync_status(
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    ensure_ecom_background_sync_worker()
+    return ecom_background_sync_status()
 
 
 @app.post("/api/ecom/full-sync/start")

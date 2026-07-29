@@ -216,6 +216,31 @@ function renderFullEcomSyncStatus(status) {
   box.innerHTML = `<div>${escapeHtml(summary)}</div>${message}`;
 }
 
+function renderInternalEcomSyncStatus(status) {
+  const box = $("#internalEcomSyncStatus");
+  if (!box) return;
+  if (!status) {
+    box.textContent = "";
+    return;
+  }
+  const stateText = status.enabled ? status.status : "désactivée";
+  const message = status.message || "Sync interne en attente.";
+  const details = [
+    `${stateText}`,
+    `lot ${status.batch_size || 0}`,
+    `${status.interval_seconds || 0}s`,
+    status.finished_at || status.started_at || "",
+  ].filter(Boolean).join(" · ");
+  box.innerHTML = `<div>${escapeHtml(details)}</div><div>${escapeHtml(message)}</div>`;
+}
+
+async function loadInternalEcomSyncStatus() {
+  if (!isAdmin() || !$("#internalEcomSyncStatus")) return null;
+  const status = await api("/api/ecom/internal-sync/status");
+  renderInternalEcomSyncStatus(status);
+  return status;
+}
+
 async function loadFullEcomSyncStatus() {
   if (!isAdmin() || !$("#fullEcomSyncStatus")) return;
   const status = await api("/api/ecom/full-sync/status");
@@ -1028,21 +1053,10 @@ async function setup() {
     reloadBrands();
   });
   $("#refreshIntegrations").addEventListener("click", () => loadIntegrations());
-  const fullSyncButton = $("#fullEcomSyncButton");
-  if (fullSyncButton) {
-    fullSyncButton.addEventListener("click", () => runFullEcomSync().catch((error) => {
-      window.alert(error.message || "La synchronisation complète a échoué.");
-      loadFullEcomSyncStatus();
-    }));
-    loadFullEcomSyncStatus().catch(() => {});
-    window.setInterval(() => {
-      loadFullEcomSyncStatus().then((status) => {
-        if (status && status.status === "success") {
-          state.loadedPages.clear();
-        }
-      }).catch(() => {});
-    }, 15000);
-  }
+  loadInternalEcomSyncStatus().catch(() => {});
+  window.setInterval(() => {
+    loadInternalEcomSyncStatus().catch(() => {});
+  }, 15000);
   const reloadSyncedProducts = debounce(() => loadSyncedProducts());
   $("#syncedProductSearch").addEventListener("input", () => reloadSyncedProducts());
   $("#syncedProductLimit").addEventListener("input", () => reloadSyncedProducts());

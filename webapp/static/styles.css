@@ -103,14 +103,16 @@ button:hover {
   text-align: left;
 }
 
-#fullEcomSyncStatus {
+#fullEcomSyncStatus,
+#internalEcomSyncStatus {
   max-width: 100%;
   overflow-wrap: anywhere;
   font-size: 13px;
   line-height: 1.35;
 }
 
-#fullEcomSyncStatus div + div {
+#fullEcomSyncStatus div + div,
+#internalEcomSyncStatus div + div {
   margin-top: 4px;
 }
 
