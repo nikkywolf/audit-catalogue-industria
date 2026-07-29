@@ -15,7 +15,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlsplit, urlunsplit
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 import uuid
@@ -1583,6 +1583,217 @@ def split_error_list(value: Any) -> list[str]:
     return [item.strip() for item in text.split("|") if item.strip()]
 
 
+def audit_is_empty(value: Any) -> bool:
+    return clean(value) == ""
+
+
+def audit_normalize_text(value: Any) -> str:
+    return clean(value).lower()
+
+
+def audit_brand_in_title(row: dict[str, Any], title_column: str) -> bool:
+    brand = audit_normalize_text(row.get("Brand"))
+    title = audit_normalize_text(row.get(title_column))
+    return bool(brand and title and brand in title)
+
+
+def audit_extract_image_filenames(images_value: Any) -> list[str]:
+    if audit_is_empty(images_value):
+        return []
+    filenames = []
+    for part in re.split(r"[,|;]", clean(images_value)):
+        part = part.strip()
+        if not part:
+            continue
+        parsed = urlparse(part)
+        path = parsed.path if parsed.path else part
+        filename = unquote(path.split("/")[-1]).strip()
+        if filename:
+            filenames.append(filename)
+    return filenames
+
+
+def audit_bad_image_name(filename: str) -> bool:
+    name = filename.lower()
+    bad_patterns = [
+        r"^img[_-]?\d+",
+        r"^dsc[_-]?\d+",
+        r"^image[_-]?\d*",
+        r"^photo[_-]?\d*",
+        r"^capture",
+        r"^screenshot",
+        r"untitled",
+        r"copie",
+        r"copy",
+        r"\s",
+    ]
+    return len(name) < 8 or any(re.search(pattern, name) for pattern in bad_patterns)
+
+
+def audit_has_bad_image_name(images_value: Any) -> bool:
+    filenames = audit_extract_image_filenames(images_value)
+    return bool(filenames and any(audit_bad_image_name(filename) for filename in filenames))
+
+
+def audit_has_h2_any(value: Any, titles: list[str]) -> bool:
+    html_text = clean(value)
+    if not html_text:
+        return False
+    return any(
+        re.search(rf"<h2>\s*{re.escape(title)}\s*</h2>", html_text, flags=re.IGNORECASE)
+        for title in titles
+    )
+
+
+def audit_section_is_empty_any(value: Any, titles: list[str]) -> bool:
+    html_text = clean(value)
+    if not html_text:
+        return True
+    for title in titles:
+        match = re.search(
+            rf"<h2>\s*{re.escape(title)}\s*</h2>(.*?)(<h2>|$)",
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            content = re.sub("<.*?>", "", match.group(1)).strip()
+            return content == ""
+    return False
+
+
+def audit_product_row(row: dict[str, Any]) -> dict[str, str]:
+    score = 100
+    critical: list[str] = []
+    major: list[str] = []
+    minor: list[str] = []
+    catalog_alerts: list[str] = []
+    correction_types: set[str] = set()
+
+    images = row.get("Images")
+    if audit_is_empty(images):
+        score -= 15
+        critical.append("Image manquante")
+        correction_types.add("Image à ajouter")
+    elif audit_has_bad_image_name(images):
+        score -= 3
+        minor.append("Image possiblement mal nommée")
+        correction_types.add("Image à renommer")
+
+    for field, label in [
+        ("FC_Description_Short", "FC description courte manquante"),
+        ("US_Description_Short", "US description courte manquante"),
+    ]:
+        if audit_is_empty(row.get(field)):
+            score -= 10
+            critical.append(label)
+            correction_types.add("Contenu à créer")
+
+    fc_long = row.get("FC_Description_Long")
+    us_long = row.get("US_Description_Long")
+    if audit_is_empty(fc_long):
+        score -= 15
+        critical.append("FC description longue manquante")
+        correction_types.add("Contenu à créer")
+    if audit_is_empty(us_long):
+        score -= 15
+        critical.append("US description longue manquante")
+        correction_types.add("Contenu à créer")
+
+    if not audit_is_empty(fc_long):
+        if not audit_has_h2_any(fc_long, ["DESCRIPTION"]):
+            score -= 5
+            major.append("FC H2 DESCRIPTION manquant")
+            correction_types.add("HTML à corriger")
+        elif audit_section_is_empty_any(fc_long, ["DESCRIPTION"]):
+            score -= 10
+            critical.append("FC section DESCRIPTION vide")
+            correction_types.add("HTML à corriger")
+        if not audit_has_h2_any(fc_long, ["UTILISATION"]):
+            score -= 5
+            major.append("FC H2 UTILISATION manquant")
+            correction_types.add("HTML à corriger")
+        elif audit_section_is_empty_any(fc_long, ["UTILISATION"]):
+            score -= 10
+            critical.append("FC section UTILISATION vide")
+            correction_types.add("HTML à corriger")
+
+    if not audit_is_empty(us_long):
+        if not audit_has_h2_any(us_long, ["DESCRIPTION"]):
+            score -= 5
+            major.append("US H2 DESCRIPTION manquant")
+            correction_types.add("HTML à corriger")
+        elif audit_section_is_empty_any(us_long, ["DESCRIPTION"]):
+            score -= 10
+            critical.append("US section DESCRIPTION vide")
+            correction_types.add("HTML à corriger")
+        if not audit_has_h2_any(us_long, ["HOW TO USE", "USE"]):
+            score -= 5
+            major.append("US H2 HOW TO USE / USE manquant")
+            correction_types.add("HTML à corriger")
+        elif audit_section_is_empty_any(us_long, ["HOW TO USE", "USE"]):
+            score -= 10
+            critical.append("US section HOW TO USE / USE vide")
+            correction_types.add("HTML à corriger")
+
+    for field, label, penalty, target in [
+        ("FC_Meta_Title", "FC meta title manquant", 5, major),
+        ("FC_Meta_Description", "FC meta description manquante", 5, major),
+        ("US_Meta_Title", "US meta title manquant", 5, major),
+        ("US_Meta_Description", "US meta description manquante", 5, major),
+        ("FC_URL", "FC URL manquante", 3, major),
+        ("US_URL", "US URL manquante", 3, major),
+        ("FR_Meta_Title", "FR meta title manquant", 2, minor),
+        ("FR_Meta_Description", "FR meta description manquante", 2, minor),
+        ("FR_URL", "FR URL manquante", 2, minor),
+    ]:
+        if audit_is_empty(row.get(field)):
+            score -= penalty
+            target.append(label)
+            correction_types.add("SEO à corriger")
+
+    if audit_is_empty(row.get("FC_Category_1")) and audit_is_empty(row.get("US_Category_1")):
+        score -= 5
+        major.append("Catégorie principale manquante")
+        correction_types.add("Catégorie à corriger")
+
+    title_columns = ["FR_Title_Short", "FR_Title_Long", "FC_Title_Short", "FC_Title_Long", "US_Title_Short", "US_Title_Long"]
+    if any(audit_brand_in_title(row, column) for column in title_columns):
+        score -= 5
+        major.append("Marque présente dans un titre")
+        correction_types.add("Titre à corriger")
+
+    visible = clean(row.get("Visible")).upper()
+    backorder_disabled = clean(row.get("Stock_Disable_Sold_Out")).upper()
+    if visible == "N":
+        catalog_alerts.append("Produit invisible — vérifier si volontaire")
+    if visible == "S" and backorder_disabled == "Y":
+        catalog_alerts.append("Visible lorsque disponible — configuration normale")
+    if visible == "S" and backorder_disabled != "Y":
+        catalog_alerts.append("Visible lorsque disponible mais backorder autorisé — à vérifier")
+    if visible == "Y" and backorder_disabled == "Y":
+        catalog_alerts.append("Produit visible avec backorder désactivé — à vérifier")
+
+    score = max(score, 0)
+    if critical:
+        priority = "Critique"
+    elif major:
+        priority = "Action requise"
+    elif minor:
+        priority = "À surveiller"
+    else:
+        priority = "Conforme"
+
+    return {
+        "Score": str(score),
+        "Priorité": priority,
+        "Erreurs critiques": " | ".join(critical),
+        "Erreurs majeures": " | ".join(major),
+        "Erreurs mineures": " | ".join(minor),
+        "Alertes catalogue": " | ".join(catalog_alerts),
+        "Type de correction": " | ".join(sorted(correction_types)),
+    }
+
+
 def row_errors(row: dict[str, Any]) -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     for error in split_error_list(row.get("Erreurs critiques")):
@@ -1658,12 +1869,12 @@ def load_ecom_api_products() -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
             continue
         payload["Source catalogue"] = "API eCom"
-        if not row_errors(payload):
-            payload["Priorité"] = clean(payload.get("Priorité")) or "Action requise"
-            payload["Type de correction"] = clean(payload.get("Type de correction")) or "API eCom"
-            payload["Alertes catalogue"] = clean(payload.get("Alertes catalogue")) or "Produit synchronisé depuis eCom API"
+        payload.update(audit_product_row(payload))
         if not clean(row["enriched_at"]):
-            payload["Alertes catalogue"] = clean(payload.get("Alertes catalogue")) or "Produit synchronisé à enrichir"
+            alerts = split_error_list(payload.get("Alertes catalogue"))
+            if "Produit synchronisé à enrichir" not in alerts:
+                alerts.append("Produit synchronisé à enrichir")
+            payload["Alertes catalogue"] = " | ".join(alerts)
         products.append(payload)
     return products
 
