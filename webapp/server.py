@@ -1494,30 +1494,40 @@ def resync_ecom_products_to_catalogue_report(variant_ids: list[str], limit: int 
     selected_ids = [clean(variant_id) for variant_id in variant_ids if clean(variant_id)]
     selected_ids = selected_ids[: max(1, min(int(limit), 100))]
 
-    product_ids: list[str] = []
-    seen_product_ids: set[str] = set()
+    selected_by_product_id: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for variant_id in selected_ids:
         row = product_map.get(variant_id)
         if not row:
             continue
         internal_id = product_internal_id(row)
-        if internal_id and internal_id not in seen_product_ids:
-            seen_product_ids.add(internal_id)
-            product_ids.append(internal_id)
+        if internal_id:
+            selected_by_product_id.setdefault(internal_id, []).append((variant_id, row))
 
     synced_at = now_text()
     products_refreshed = 0
     variants_updated = 0
     updated_variant_ids: set[str] = set()
-    for internal_id in product_ids:
+    for internal_id, selected_rows in selected_by_product_id.items():
         product = lightspeed_ecom_get_product(internal_id)
         save_enriched_ecom_product(product, synced_at)
         context = ecom_product_context(product)
-        for mapped in ecom_audit_candidate_rows(product, context):
-            mapped.update(audit_product_row(mapped))
-            variant_id = product_id(mapped)
-            if not variant_id:
+        mapped_rows = ecom_audit_candidate_rows(product, context)
+        for selected_variant_id, original_row in selected_rows:
+            original_sku = clean(original_row.get("SKU")).lower()
+            original_upc = clean(original_row.get("UPC")).lower()
+            matched = next((row for row in mapped_rows if product_id(row) == selected_variant_id), None)
+            if not matched and original_sku:
+                matched = next((row for row in mapped_rows if clean(row.get("SKU")).lower() == original_sku), None)
+            if not matched and original_upc:
+                matched = next((row for row in mapped_rows if clean(row.get("UPC")).lower() == original_upc), None)
+            if not matched and len(mapped_rows) == 1:
+                matched = mapped_rows[0]
+            if not matched:
                 continue
+            mapped = dict(matched)
+            mapped["Internal_ID"] = clean(original_row.get("Internal_ID")) or clean(mapped.get("Internal_ID"))
+            mapped["Internal_Variant_ID"] = selected_variant_id
+            mapped.update(audit_product_row(mapped))
             with connect() as conn:
                 conn.execute(
                     """
@@ -1525,9 +1535,9 @@ def resync_ecom_products_to_catalogue_report(variant_ids: list[str], limit: int 
                     (Internal_Variant_ID, payload, updated_at)
                     VALUES (?, ?, ?)
                     """,
-                    (variant_id, json.dumps(mapped, ensure_ascii=False), synced_at),
+                    (selected_variant_id, json.dumps(mapped, ensure_ascii=False), synced_at),
                 )
-            updated_variant_ids.add(variant_id)
+            updated_variant_ids.add(selected_variant_id)
             variants_updated += 1
         products_refreshed += 1
         time.sleep(1.5)
