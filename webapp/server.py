@@ -1658,10 +1658,12 @@ def load_ecom_api_products() -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
             continue
         payload["Source catalogue"] = "API eCom"
+        if not row_errors(payload):
+            payload["Priorité"] = clean(payload.get("Priorité")) or "Action requise"
+            payload["Type de correction"] = clean(payload.get("Type de correction")) or "API eCom"
+            payload["Alertes catalogue"] = clean(payload.get("Alertes catalogue")) or "Produit synchronisé depuis eCom API"
         if not clean(row["enriched_at"]):
-            payload.setdefault("Priorité", "Action requise")
-            payload.setdefault("Type de correction", "API eCom")
-            payload.setdefault("Alertes catalogue", "Produit synchronisé à enrichir")
+            payload["Alertes catalogue"] = clean(payload.get("Alertes catalogue")) or "Produit synchronisé à enrichir"
         products.append(payload)
     return products
 
