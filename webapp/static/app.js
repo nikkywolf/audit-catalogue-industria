@@ -181,6 +181,45 @@ async function runEcomEnrich() {
   }
 }
 
+function renderFullEcomSyncStatus(status) {
+  const box = $("#fullEcomSyncStatus");
+  if (!box) return;
+  if (!status || status.status === "never") {
+    box.textContent = "";
+    return;
+  }
+  const suffix = status.finished_at || status.started_at || "";
+  box.textContent = `${status.status} · ${status.products_seen || 0} produits · ${status.variants_saved || 0} variantes${suffix ? ` · ${suffix}` : ""}`;
+}
+
+async function loadFullEcomSyncStatus() {
+  if (!isAdmin() || !$("#fullEcomSyncStatus")) return;
+  const status = await api("/api/ecom/full-sync/status");
+  renderFullEcomSyncStatus(status);
+  return status;
+}
+
+async function runFullEcomSync() {
+  const button = $("#fullEcomSyncButton");
+  const ok = window.confirm(
+    "Lancer la synchronisation complète du catalogue eCom? Le rapport du dashboard sera remplacé seulement quand la sync sera terminée avec succès."
+  );
+  if (!ok) return;
+  button.disabled = true;
+  button.textContent = "Sync complète en cours...";
+  try {
+    const result = await api("/api/ecom/full-sync/start", {
+      method: "POST",
+      body: JSON.stringify({ batch_size: 20 }),
+    });
+    window.alert(result.message || "Synchronisation complète démarrée.");
+    await loadFullEcomSyncStatus();
+  } finally {
+    button.disabled = false;
+    button.textContent = "Synchroniser catalogue eCom";
+  }
+}
+
 async function loadSyncedProducts() {
   const search = encodeURIComponent($("#syncedProductSearch").value);
   const limit = encodeURIComponent($("#syncedProductLimit").value);
@@ -901,14 +940,21 @@ async function setup() {
     reloadBrands();
   });
   $("#refreshIntegrations").addEventListener("click", () => loadIntegrations());
-  $("#ecomSyncButton").addEventListener("click", () => runEcomSyncMissing().catch((error) => {
-    window.alert(error.message || "La synchronisation a échoué.");
-    loadBootstrap();
-  }));
-  $("#ecomEnrichButton").addEventListener("click", () => runEcomEnrich().catch((error) => {
-    window.alert(error.message || "L'enrichissement a échoué.");
-    loadBootstrap();
-  }));
+  const fullSyncButton = $("#fullEcomSyncButton");
+  if (fullSyncButton) {
+    fullSyncButton.addEventListener("click", () => runFullEcomSync().catch((error) => {
+      window.alert(error.message || "La synchronisation complète a échoué.");
+      loadFullEcomSyncStatus();
+    }));
+    loadFullEcomSyncStatus().catch(() => {});
+    window.setInterval(() => {
+      loadFullEcomSyncStatus().then((status) => {
+        if (status && status.status === "success") {
+          state.loadedPages.clear();
+        }
+      }).catch(() => {});
+    }, 15000);
+  }
   const reloadSyncedProducts = debounce(() => loadSyncedProducts());
   $("#syncedProductSearch").addEventListener("input", () => reloadSyncedProducts());
   $("#syncedProductLimit").addEventListener("input", () => reloadSyncedProducts());

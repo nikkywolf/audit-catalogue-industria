@@ -10,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 import secrets
+import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
+ECOM_FULL_SYNC_LOCK = threading.Lock()
 
 
 def load_dotenv() -> None:
@@ -272,6 +274,17 @@ def ensure_ecom_api_tables() -> None:
                 variants_saved INTEGER NOT NULL DEFAULT 0,
                 start_offset INTEGER NOT NULL DEFAULT 0,
                 next_offset INTEGER NOT NULL DEFAULT 0,
+                message TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS ecom_full_sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                offset INTEGER NOT NULL DEFAULT 0,
+                products_seen INTEGER NOT NULL DEFAULT 0,
+                variants_saved INTEGER NOT NULL DEFAULT 0,
                 message TEXT DEFAULT ''
             );
             """
@@ -1455,6 +1468,119 @@ def refresh_ecom_products_from_lightspeed(variant_ids: list[str], limit: int = 1
     }
 
 
+def latest_ecom_full_sync_status() -> dict[str, Any]:
+    ensure_ecom_api_tables()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM ecom_full_sync_runs
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return {"status": "never", "message": "Aucune synchronisation complète lancée."}
+    return dict(row)
+
+
+def ecom_full_sync_is_running() -> bool:
+    status = latest_ecom_full_sync_status()
+    return clean(status.get("status")) == "running"
+
+
+def run_ecom_full_catalogue_sync(batch_size: int = 20, max_products: int = 0) -> None:
+    if not ECOM_FULL_SYNC_LOCK.acquire(blocking=False):
+        return
+    ensure_ecom_api_tables()
+    started_at = now_text()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO ecom_full_sync_runs (status, started_at, message)
+            VALUES ('running', ?, 'Synchronisation complète eCom démarrée.')
+            """,
+            (started_at,),
+        )
+        run_id = int(cursor.lastrowid)
+        conn.execute("DELETE FROM ecom_api_products")
+
+    offset = 0
+    products_seen = 0
+    variants_saved = 0
+    try:
+        while True:
+            if max_products and products_seen >= max_products:
+                break
+            current_batch_size = max(1, min(batch_size, 100))
+            if max_products:
+                current_batch_size = min(current_batch_size, max_products - products_seen)
+            _, raw_body = lightspeed_ecom_get_products_raw(current_batch_size, offset)
+            payload = json.loads(raw_body)
+            products = extract_ecom_products(payload)
+            if not products:
+                break
+
+            for product_summary in products:
+                product_id_value = ecom_product_id(product_summary)
+                product = lightspeed_ecom_get_product(product_id_value) if product_id_value else product_summary
+                variants_saved += save_enriched_ecom_product(product, started_at)
+                products_seen += 1
+                offset += 1
+                with connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE ecom_full_sync_runs
+                        SET offset = ?, products_seen = ?, variants_saved = ?, message = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            offset,
+                            products_seen,
+                            variants_saved,
+                            f"{products_seen} produit(s) lus, {variants_saved} variante(s) préparée(s).",
+                            run_id,
+                        ),
+                    )
+                time.sleep(1.2)
+
+            if len(products) < current_batch_size:
+                break
+            time.sleep(2)
+
+        published = publish_ecom_api_products_to_catalogue_report()
+        message = (
+            f"Synchronisation complète terminée: {published['products']} produit(s), "
+            f"{published['conformes']} conformes, {published['action_required']} action requise, "
+            f"{published['critical']} critiques."
+        )
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE ecom_full_sync_runs
+                SET status = 'success', finished_at = ?, offset = ?, products_seen = ?,
+                    variants_saved = ?, message = ?
+                WHERE id = ?
+                """,
+                (now_text(), offset, products_seen, variants_saved, message, run_id),
+            )
+    except Exception as exc:
+        message = mask_sensitive_text_full(str(exc))[:1500]
+        logger.exception("Full eCom catalogue sync failed")
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE ecom_full_sync_runs
+                SET status = 'error', finished_at = ?, offset = ?, products_seen = ?,
+                    variants_saved = ?, message = ?
+                WHERE id = ?
+                """,
+                (now_text(), offset, products_seen, variants_saved, message, run_id),
+            )
+    finally:
+        ECOM_FULL_SYNC_LOCK.release()
+
+
 def ecom_mapping_status(row: dict[str, str], field: str, source: str, required: bool = True) -> dict[str, str]:
     value = clean(row.get(field))
     if value:
@@ -2594,6 +2720,82 @@ def adjusted_brand_summary(products: list[dict[str, Any]], approvals: set[tuple[
     return sorted(rows, key=lambda item: (item["Critiques"], item["Action_requise"], item["Produits"]), reverse=True)
 
 
+def publish_ecom_api_products_to_catalogue_report() -> dict[str, int]:
+    ensure_ecom_api_tables()
+    now = now_text()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT mapped_payload
+            FROM ecom_api_products
+            ORDER BY Brand, Product_Title, Internal_Variant_ID
+            """
+        ).fetchall()
+
+    products: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["mapped_payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload.update(audit_product_row(payload))
+        products.append(payload)
+
+    summary = adjusted_brand_summary(products, set())
+    conformes = sum(1 for row in products if clean(row.get("Priorité")) == "Conforme")
+    action_required = sum(1 for row in products if clean(row.get("Priorité")) == "Action requise")
+    critical = sum(1 for row in products if clean(row.get("Priorité")) == "Critique")
+
+    with connect() as conn:
+        conn.execute("DELETE FROM catalogue_report")
+        conn.execute("DELETE FROM brand_summary")
+        for row in products:
+            variant_id = product_id(row) or product_internal_id(row) or str(len(products))
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO catalogue_report
+                (Internal_Variant_ID, payload, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (variant_id, json.dumps(row, ensure_ascii=False), now),
+            )
+        for row in summary:
+            brand = clean(row.get("Brand"))
+            if not brand:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO brand_summary
+                (Brand, payload, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (brand, json.dumps(row, ensure_ascii=False), now),
+            )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO audit_history
+            (Date, Produits, Conformes, Action_requise, Critiques)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (now, len(products), conformes, action_required, critical),
+        )
+        conn.execute(
+            """
+            INSERT INTO sync_runs (source, status, started_at, finished_at, message)
+            VALUES ('lightspeed_ecom_api', 'success', ?, ?, ?)
+            """,
+            (now, now, f"Catalogue API eCom publié: {len(products)} produit(s)."),
+        )
+    return {
+        "products": len(products),
+        "conformes": conformes,
+        "action_required": action_required,
+        "critical": critical,
+    }
+
+
 def filter_products(
     products: list[dict[str, Any]],
     approvals: set[tuple[str, str]],
@@ -3433,6 +3635,36 @@ async def api_ecom_enrich(
     if isinstance(payload, dict):
         limit = int(clean(payload.get("limit")) or 10)
     return enrich_ecom_api_products(limit)
+
+
+@app.get("/api/ecom/full-sync/status")
+def api_ecom_full_sync_status(
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    return latest_ecom_full_sync_status()
+
+
+@app.post("/api/ecom/full-sync/start")
+async def api_ecom_full_sync_start(
+    payload: Optional[dict[str, Any]] = None,
+    x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
+):
+    require_admin(x_remote_user)
+    if ecom_full_sync_is_running():
+        return {"ok": True, "already_running": True, "message": "La synchronisation complète est déjà en cours."}
+    batch_size = 20
+    max_products = 0
+    if isinstance(payload, dict):
+        batch_size = int(clean(payload.get("batch_size")) or 20)
+        max_products = int(clean(payload.get("max_products")) or 0)
+    thread = threading.Thread(
+        target=run_ecom_full_catalogue_sync,
+        kwargs={"batch_size": batch_size, "max_products": max_products},
+        daemon=True,
+    )
+    thread.start()
+    return {"ok": True, "message": "Synchronisation complète démarrée."}
 
 
 @app.post("/catalogue/ecom-api-enrich")
