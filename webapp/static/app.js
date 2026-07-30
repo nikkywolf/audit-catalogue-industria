@@ -330,7 +330,35 @@ function applyRoleVisibility() {
 
 function renderBrandSummary(rows) {
   const columns = ["Brand", "Produits", "Score_moyen", "Conformes", "A_surveillance", "Action_requise", "Critiques", "% conformes", "% critiques"];
-  $("#brandSummary").innerHTML = renderSimpleTable(columns, rows);
+  $("#brandSummary").innerHTML = `
+    <table class="brand-table">
+      <thead>
+        <tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}<th>Voir</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            ${columns.map((column) => `<td>${escapeHtml(row[column] ?? "")}</td>`).join("")}
+            <td><button type="button" class="compact-button" data-brand-errors="${escapeHtml(row.Brand)}">Erreurs</button></td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+  document.querySelectorAll("[data-brand-errors]").forEach((button) => {
+    button.addEventListener("click", () => showBrandErrors(button.dataset.brandErrors));
+  });
+}
+
+async function showBrandErrors(brand) {
+  setPage("errors");
+  $("#brandFilter").value = brand;
+  $("#priorityFilter").value = "";
+  $("#approvalFilter").value = "pending";
+  $("#productSearch").value = "";
+  state.openProductId = null;
+  state.selectedProductIds.clear();
+  await loadProducts();
 }
 
 function renderSimpleTable(columns, rows) {

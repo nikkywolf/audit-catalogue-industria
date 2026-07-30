@@ -2529,7 +2529,11 @@ def load_gpt_batch_product_keys() -> tuple[set[str], set[str]]:
     ensure_batch_tables()
     with connect() as conn:
         rows = conn.execute(
-            "SELECT Internal_Variant_ID, Internal_ID FROM gpt_batch_items"
+            """
+            SELECT Internal_Variant_ID, Internal_ID
+            FROM gpt_batch_items
+            WHERE status IN ('pending', 'submitted', 'completed', 'approved')
+            """
         ).fetchall()
     variant_ids = {str(row["Internal_Variant_ID"]) for row in rows if row["Internal_Variant_ID"]}
     internal_ids = {str(row["Internal_ID"]) for row in rows if row["Internal_ID"]}
