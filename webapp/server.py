@@ -62,7 +62,6 @@ ECOM_FULL_SYNC_LOCK = threading.Lock()
 ECOM_RESYNC_WORKER_LOCK = threading.Lock()
 ECOM_RESYNC_WORKER_THREAD: threading.Thread | None = None
 ECOM_BACKGROUND_SYNC_LOCK = threading.Lock()
-ECOM_BACKGROUND_SYNC_THREAD: threading.Thread | None = None
 
 
 def load_dotenv() -> None:
@@ -1882,22 +1881,6 @@ def run_ecom_background_sync_tick() -> dict[str, Any]:
         ECOM_BACKGROUND_SYNC_LOCK.release()
 
 
-def run_ecom_background_sync_worker() -> None:
-    while True:
-        run_ecom_background_sync_tick()
-        time.sleep(ecom_background_sync_interval_seconds())
-
-
-def ensure_ecom_background_sync_worker() -> None:
-    global ECOM_BACKGROUND_SYNC_THREAD
-    if not ecom_background_sync_enabled():
-        return
-    if ECOM_BACKGROUND_SYNC_THREAD and ECOM_BACKGROUND_SYNC_THREAD.is_alive():
-        return
-    ECOM_BACKGROUND_SYNC_THREAD = threading.Thread(target=run_ecom_background_sync_worker, daemon=True)
-    ECOM_BACKGROUND_SYNC_THREAD.start()
-
-
 def ecom_background_sync_status() -> dict[str, Any]:
     ensure_ecom_api_tables()
     with connect() as conn:
@@ -1932,7 +1915,6 @@ def startup_background_workers() -> None:
             (now_text(),),
         )
     ensure_ecom_resync_worker()
-    ensure_ecom_background_sync_worker()
 
 
 def latest_ecom_full_sync_status() -> dict[str, Any]:
@@ -4139,7 +4121,6 @@ def api_ecom_internal_sync_status(
     x_remote_user: Optional[str] = Header(default=None, alias="X-Remote-User"),
 ):
     require_admin(x_remote_user)
-    ensure_ecom_background_sync_worker()
     return ecom_background_sync_status()
 
 

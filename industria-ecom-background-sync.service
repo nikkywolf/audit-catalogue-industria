@@ -1,0 +1,16 @@
+[Unit]
+Description=Industria eCom internal catalogue background sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/audit-catalogue-industria
+EnvironmentFile=/home/ubuntu/audit-catalogue-industria/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/audit-catalogue-industria/venv/bin/python /home/ubuntu/audit-catalogue-industria/ecom_background_sync_worker.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
