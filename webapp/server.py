@@ -2345,28 +2345,49 @@ def audit_has_bad_image_name(images_value: Any) -> bool:
     return bool(filenames and any(audit_bad_image_name(filename) for filename in filenames))
 
 
-def audit_has_h2_any(value: Any, titles: list[str]) -> bool:
+def audit_normalize_heading(value: Any) -> str:
+    text = re.sub("<.*?>", "", clean(value))
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+    text = re.sub(r"[^a-zA-Z0-9]+", " ", text).strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def audit_h2_sections(value: Any) -> list[tuple[str, str]]:
     html_text = clean(value)
     if not html_text:
-        return False
+        return []
+    matches = list(re.finditer(r"<h2\b[^>]*>(.*?)</h2>", html_text, flags=re.IGNORECASE | re.DOTALL))
+    sections: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(html_text)
+        sections.append((audit_normalize_heading(match.group(1)), html_text[start:end]))
+    return sections
+
+
+def audit_heading_matches(heading: str, title: str) -> bool:
+    wanted = audit_normalize_heading(title)
+    return bool(wanted and (heading == wanted or heading.startswith(f"{wanted} ") or wanted in heading))
+
+
+def audit_has_h2_any(value: Any, titles: list[str]) -> bool:
     return any(
-        re.search(rf"<h2>\s*{re.escape(title)}\s*</h2>", html_text, flags=re.IGNORECASE)
+        audit_heading_matches(heading, title)
+        for heading, _ in audit_h2_sections(value)
         for title in titles
     )
 
 
 def audit_section_is_empty_any(value: Any, titles: list[str]) -> bool:
-    html_text = clean(value)
-    if not html_text:
+    sections = audit_h2_sections(value)
+    if not sections:
         return True
     for title in titles:
-        match = re.search(
-            rf"<h2>\s*{re.escape(title)}\s*</h2>(.*?)(<h2>|$)",
-            html_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if match:
-            content = re.sub("<.*?>", "", match.group(1)).strip()
+        for heading, body in sections:
+            if not audit_heading_matches(heading, title):
+                continue
+            content = re.sub("<.*?>", "", body).strip()
             return content == ""
     return False
 
