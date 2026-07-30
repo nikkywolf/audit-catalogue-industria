@@ -2457,11 +2457,12 @@ def audit_product_row(row: dict[str, Any]) -> dict[str, str]:
             score -= 10
             critical.append("US section DESCRIPTION vide")
             correction_types.add("HTML à corriger")
-        if not audit_has_h2_any(us_long, ["HOW TO USE", "USE"]):
+        us_use_headings = ["HOW TO USE", "USE", "UTILISATION", "MODE D EMPLOI", "MODE D'EMPLOI"]
+        if not audit_has_h2_any(us_long, us_use_headings):
             score -= 5
             major.append("US H2 HOW TO USE / USE manquant")
             correction_types.add("HTML à corriger")
-        elif audit_section_is_empty_any(us_long, ["HOW TO USE", "USE"]):
+        elif audit_section_is_empty_any(us_long, us_use_headings):
             score -= 10
             critical.append("US section HOW TO USE / USE vide")
             correction_types.add("HTML à corriger")
