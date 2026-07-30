@@ -419,10 +419,29 @@ function renderProducts() {
     });
   });
   document.querySelectorAll("[data-mark-batch-approved]").forEach((link) => {
-    link.addEventListener("click", () => {
-      api(`/api/gpt-batches/items/${encodeURIComponent(link.dataset.markBatchApproved)}/mark-approved`, {
-        method: "POST",
-      }).catch(() => {});
+    link.addEventListener("click", async (event) => {
+      event.preventDefault();
+      const url = link.href;
+      const variantId = link.dataset.markBatchApproved;
+      const originalText = link.textContent;
+      link.textContent = "Ouverture...";
+      try {
+        await api(`/api/gpt-batches/items/${encodeURIComponent(variantId)}/mark-approved`, {
+          method: "POST",
+        });
+        state.selectedProductIds.delete(variantId);
+        state.openProductId = null;
+        window.open(url, "_blank", "noopener,noreferrer");
+        await loadProducts();
+        if ($("#gptBatch").classList.contains("active")) {
+          await loadBatchApproved();
+        }
+      } catch (error) {
+        window.alert(error.message || "Impossible d'ajouter le produit aux batchs approuvés.");
+        window.open(url, "_blank", "noopener,noreferrer");
+      } finally {
+        link.textContent = originalText;
+      }
     });
   });
   const selectVisible = document.querySelector("[data-select-visible-products]");
